@@ -82,12 +82,17 @@ imports the fixed code and calls it with real inputs) — the same instrument us
 |---|---|---|
 | Unaided discovery | No bug report at all — find every defect yourself | 13/24 (54%) |
 | Symptom report | A user-style bug report, no cause named | **27/30 (90%)** |
-| Precise instructions | Told exactly which file and which defect | 18/18 (100%) |
+| Precise instructions | Told exactly which file and which defect | **29/30 (97%)** |
 | Discovery + defect checklist | Unaided, but handed a checklist of defect categories | 17/24 (71%) |
 
 The gap between the first two rows is the finding that matters most: this model is far better at fixing a bug
 you can describe than at finding one you can't. That's exactly why the included `AGENTS.md` pushes toward
 "here's what's wrong" requests over "find what's wrong" ones — see below.
+
+These four scores cover 6 of the suite's 7 scenarios — `api-versioning` is excluded from quality comparisons
+because 3 of its 6 "bugs" are actually a missing feature (add a v2 endpoint), not a defect; every model tested
+scores near-ceiling on it, so it doesn't discriminate quality. It's still part of the benchmark suite shipped in
+this repo (`benchmarks/`) for functional coverage, just not part of the numbers above.
 
 **Decode speed on the same suite, extended to other Apple Silicon chips the same way as the setup-time
 estimate** (scaled from each chip's published memory bandwidth relative to the M1's measured number — real
@@ -146,6 +151,22 @@ curl -fsSL <raw-url>/setup.sh | bash -s -- --force-download  # re-download the m
 `--doctor` is the one to reach for first if something's wrong — it checks hardware, prerequisites, the model
 file, the running server (including whether its actual flags still match this kit's validated set), and both
 of `pi`'s config files, and points at the specific command above that fixes whatever it finds.
+
+`--benchmark` reproduces the results table above on your own hardware — it's the one command that needs a real
+git clone rather than the curl-pipe install, since the scenario data is too large to embed in a single script:
+
+```
+git clone https://github.com/megasoft1978/gemma4-coding-kit && cd gemma4-coding-kit
+./setup.sh --start-only        # start the server first -- --benchmark never boots one itself
+./setup.sh --benchmark          # all 7 scenarios
+./setup.sh --benchmark cart-checkout   # or just one
+```
+
+It sends each scenario's symptom-mode prompt to your already-running server, grades the response the same way
+this README's table was produced (pattern rules plus real execution for the 5 executable-oracle scenarios),
+and prints a per-scenario and aggregate score. Your numbers won't match the table exactly — temperature-0
+determinism only guarantees a given server build reproduces itself, not that it reproduces another session's
+tokens — but they should land in the same range.
 
 ## Requirements
 

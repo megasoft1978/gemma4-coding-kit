@@ -11,6 +11,10 @@
 #   curl -fsSL <raw>/setup.sh | bash -s -- --start-only     # (re)start the server with the validated flags
 #   curl -fsSL <raw>/setup.sh | bash -s -- --force-download # re-download the model even if a same-size file exists
 #
+# One mode needs a real git checkout, not the curl-pipe install, because it has data too large to embed here:
+#
+#   ./setup.sh --benchmark [scenario-id|all]   # grade a running server against the 7-scenario suite in benchmarks/
+#
 # Self-contained on purpose: when piped through `curl | bash`, there is no local checkout to reference sibling
 # files from, so every step lives in this one file. Prompts read from /dev/tty rather than stdin, because a
 # pipe consumes stdin for the script itself -- reading from stdin inside a piped script gets EOF, not a
@@ -27,6 +31,7 @@ MODE=install
 NO_EXEC=0
 ASSUME_YES=0
 FORCE_DOWNLOAD=0
+BENCH_TARGET=all
 while [ $# -gt 0 ]; do
   case "$1" in
     --doctor) MODE=doctor ;;
@@ -35,6 +40,11 @@ while [ $# -gt 0 ]; do
     --print-sig) MODE=print-sig ;;
     --print-node-snippets) MODE=print-node-snippets ;;
     --selftest) MODE=selftest ;;
+    --benchmark)
+      MODE=benchmark
+      # optional positional scenario id/"all" right after the flag, e.g. `--benchmark cart-checkout`
+      if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then BENCH_TARGET="$2"; shift; fi
+      ;;
     --no-exec) NO_EXEC=1 ;;
     --yes) ASSUME_YES=1 ;;
     --force-download) FORCE_DOWNLOAD=1 ;;
@@ -74,6 +84,11 @@ SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simpl
 # because some flags take a value (`-c 24576`) and checking that as one substring is more reliable than
 # checking `-c` and `24576` independently, which could each appear for unrelated reasons.
 CHECK_STRINGS=("-c $CTX" "-ngl 99" "-fa on" "-np 1" "--no-warmup" "--spec-type ngram-simple" "--reasoning off" "--cache-reuse 256")
+
+# Only used by --benchmark, which needs a real git checkout (benchmarks/ is too large to embed in this
+# self-contained script) -- every other mode ignores these.
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+BENCH_DIR="$SCRIPT_DIR/benchmarks"
 
 DEST="$MODEL_DIR/$MODEL_FILE"
 INSTALL_ENV="$KIT_DIR/install.env"
@@ -708,6 +723,68 @@ selftest() {
 }
 
 # ============================================================================================================
+# --benchmark -- grades an already-running, already-validated server against the 7-scenario suite in
+# benchmarks/. Never boots a server itself (same division of responsibility as --doctor: measures what's
+# there, doesn't set it up). Needs a real git checkout, not the curl-pipe install, because the scenario data
+# and oracle test trees are too large to embed in this file -- see run_benchmark's own precondition check.
+# All prompt-construction, HTTP-calling and grading logic lives in benchmarks/bench.mjs and benchmarks/
+# grade.mjs, reusing the already-verified grader rather than duplicating it here in bash.
+# ============================================================================================================
+run_benchmark() {
+  if [ ! -f "$BENCH_DIR/grade.mjs" ] || [ ! -d "$BENCH_DIR/scenarios" ] || [ ! -d "$BENCH_DIR/oracle" ]; then
+    echo "--benchmark needs the full repo checkout, not the curl-pipe install." >&2
+    echo "Run: git clone https://github.com/megasoft1978/gemma4-coding-kit && cd gemma4-coding-kit && ./setup.sh --benchmark" >&2
+    exit 1
+  fi
+  local pid; pid=$(server_pid || true)
+  if [ -z "$pid" ] || ! server_health; then
+    echo "No validated server running on port $PORT. Start one first: setup.sh --start-only" >&2
+    exit 1
+  fi
+
+  echo "== gemma4-coding-kit benchmark: $BENCH_TARGET =="
+  node "$BENCH_DIR/bench.mjs" "$BENCH_TARGET" --port "$PORT" --max-tokens "$MAX_TOKENS" | node -e '
+    let fails = 0, warns = 0, totalPass = 0, totalBugs = 0, totalWall = 0, n = 0;
+    const tag = (kind, msg) => {
+      const label = { ok: "[ ok ] ", warn: "[warn] ", fail: "[fail] ", skip: "[skip] " }[kind];
+      console.log(label + msg);
+      if (kind === "fail") fails++;
+      if (kind === "warn") warns++;
+    };
+    process.stdin.setEncoding("utf8");
+    let buf = "";
+    process.stdin.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        const r = JSON.parse(line);
+        n++;
+        if (r.verdict === "skip") { tag("skip", `${r.scenario}: ${r.detail}`); continue; }
+        if (r.verdict === "timeout") { tag("fail", `${r.scenario}: timed out waiting for a response`); continue; }
+        if (r.verdict === "empty-reasoning") { tag("warn", `${r.scenario}: reasoning channel non-empty, content empty (in ${r.wall_s}s)`); continue; }
+        if (r.verdict === "error") { tag("fail", `${r.scenario}: ${r.detail}`); continue; }
+        totalPass += r.pass; totalBugs += r.total; totalWall += r.wall_s;
+        const pct = Math.round((r.pass / r.total) * 100);
+        const line2 = `${r.scenario}: ${r.pass}/${r.total} (${pct}%) in ${r.wall_s.toFixed(1)}s`;
+        if (r.pass === r.total) tag("ok", line2);
+        else if (r.pass > 0) tag("warn", line2);
+        else tag("fail", line2);
+      }
+    });
+    process.stdin.on("end", () => {
+      if (totalBugs > 0) {
+        const pct = Math.round((totalPass / totalBugs) * 100);
+        console.log(`\n== benchmark: ${totalPass}/${totalBugs} (${pct}%) across ${n} scenario(s), ${totalWall.toFixed(1)}s wall ==`);
+        console.log("(vs. the published baseline table in README.md -- exact match is not expected; temperature-0 determinism only guarantees a given server build reproduces itself)");
+      }
+      process.exit(fails > 0 ? 1 : warns > 0 ? 2 : 0);
+    });
+  '
+}
+
+# ============================================================================================================
 # Dispatch
 # ============================================================================================================
 case "$MODE" in
@@ -731,6 +808,10 @@ case "$MODE" in
     ;;
   doctor)
     doctor
+    exit $?
+    ;;
+  benchmark)
+    run_benchmark
     exit $?
     ;;
   config-only)
