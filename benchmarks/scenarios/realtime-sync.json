@@ -1,0 +1,113 @@
+{
+  "id": "realtime-sync",
+  "stack": "React + Express + ws + TypeScript",
+  "files": {
+    "README.md": "# realtime-sync\n\nLive document sync.\n\n- `server/` \u2014 Express + `ws`. Broadcast in `server/hub.ts`, persistence in `server/store.ts`.\n- `client/` \u2014 React. Socket lifecycle in `client/src/sync/connection.ts`, outbound queue in\n  `client/src/sync/queue.ts`, the hook in `client/src/sync/useSync.ts`.\n\nEdits are queued locally, flushed to the server over a socket, and acknowledged by `opId`.\nAn edit is only removed from the queue once the server acknowledges it.\n",
+    "package.json": "{ \"name\": \"realtime-sync\", \"private\": true, \"workspaces\": [\"client\", \"server\"] }\n",
+    "shared/types.ts": "export interface Edit {\n  opId: string;\n  docId: string;\n  at: number;\n  patch: string;\n}\n\nexport interface Ack {\n  type: \"ack\";\n  opId: string;\n}\n",
+    "server/hub.ts": "import type { WebSocket } from \"ws\";\nimport type { Edit } from \"../shared/types\";\nimport { persist } from \"./store\";\n\nconst clients = new Set<WebSocket>();\n\nexport function join(ws: WebSocket) {\n  clients.add(ws);\n  ws.on(\"close\", () => clients.delete(ws));\n}\n\nexport function broadcast(edit: Edit, from: WebSocket) {\n  for (const c of clients) {\n    c.send(JSON.stringify(edit));\n  }\n}\n\nexport async function handleEdit(ws: WebSocket, edit: Edit) {\n  persist(edit);\n  broadcast(edit, ws);\n  ws.send(JSON.stringify({ type: \"ack\", opId: edit.opId }));\n}\n",
+    "server/store.ts": "import type { Edit } from \"../shared/types\";\n\nconst DOCS = new Map<string, Edit[]>();\n\nexport async function persist(edit: Edit): Promise<void> {\n  const list = DOCS.get(edit.docId) ?? [];\n  list.push(edit);\n  DOCS.set(edit.docId, list);\n}\n\nexport function history(docId: string): Edit[] {\n  return DOCS.get(docId) ?? [];\n}\n",
+    "client/src/sync/queue.ts": "import type { Edit } from \"../../../shared/types\";\n\nlet pending: Edit[] = [];\n\nexport function enqueue(edit: Edit) {\n  pending.push(edit);\n}\n\nexport function acknowledge(opId: string) {\n  pending = pending.filter((e) => e.opId !== opId);\n}\n\nexport function drain(): Edit[] {\n  const out = pending;\n  pending = [];\n  return out;\n}\n\nexport function size(): number {\n  return pending.length;\n}\n",
+    "client/src/sync/connection.ts": "import { drain } from \"./queue\";\n\nlet socket: WebSocket | null = null;\n\nexport function connect(url: string, onMessage: (data: unknown) => void) {\n  socket = new WebSocket(url);\n\n  socket.onopen = () => {\n    for (const edit of drain()) {\n      socket!.send(JSON.stringify(edit));\n    }\n  };\n\n  socket.onmessage = (ev) => onMessage(JSON.parse(ev.data));\n\n  socket.onclose = () => {\n    setTimeout(() => connect(url, onMessage), 1000);\n  };\n}\n\nexport function send(edit: unknown) {\n  socket?.send(JSON.stringify(edit));\n}\n",
+    "client/src/sync/useSync.ts": "import { useEffect, useState } from \"react\";\nimport type { Edit, Ack } from \"../../../shared/types\";\nimport { connect, send } from \"./connection\";\nimport { enqueue, acknowledge } from \"./queue\";\n\nexport function useSync(url: string, docId: string) {\n  const [edits, setEdits] = useState<Edit[]>([]);\n\n  useEffect(() => {\n    connect(url, (msg) => {\n      const m = msg as Edit | Ack;\n      if ((m as Ack).type === \"ack\") {\n        acknowledge((m as Ack).opId);\n      } else {\n        setEdits((prev) => [...prev, m as Edit]);\n      }\n    });\n  }, [url]);\n\n  function submit(patch: string) {\n    const edit: Edit = { opId: String(Math.random()), docId, at: Date.now(), patch };\n    enqueue(edit);\n    send(edit);\n  }\n\n  return { edits, submit };\n}\n"
+  },
+  "report": "1. When two people have the document open, whoever made an edit sees their own edit appear twice.\n2. If the connection drops and comes back, edits made while offline are lost \u2014 they never reach the server.\n3. After a reconnect the app gets slower and slower, and eventually several duplicate messages arrive for a\n   single edit.\n4. Occasionally an edit is acknowledged but is missing from the document history after a server restart.\n5. Two edits made in the same millisecond sometimes collide and one overwrites the other.\n6. The socket keeps reconnecting even after the user navigates away from the document.",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "broadcast echoes back to the sender",
+      "file": "server/hub",
+      "any": [
+        "if\\s*\\(\\s*\\w+\\s*!==?\\s*\\w+\\s*\\)\\s*\\{?\\s*\\w+\\s*\\.\\s*send\\s*\\(",
+        "if\\s*\\(\\s*\\w+\\s*===?\\s*\\w+\\s*\\)\\s*\\{?\\s*(continue|return)\\b",
+        "\\.\\s*filter\\s*\\(\\s*\\(?\\s*(\\w+)\\s*\\)?\\s*=>\\s*\\1\\s*!==?\\s*\\w+",
+        "new\\s+Set\\s*\\(\\s*clients\\s*\\)[\\s\\S]{0,200}?\\.\\s*delete\\s*\\("
+      ],
+      "forbid": [
+        "if\\s*\\(\\s*\\w+\\s*!==?\\s*\\w+\\s*\\)\\s*\\{?\\s*(continue|return)\\b",
+        "(const|let|var)\\s+\\w+\\s*=\\s*clients\\s*;[\\s\\S]{0,120}?\\.\\s*delete\\s*\\("
+      ],
+      "oracle": true
+    },
+    {
+      "key": "B",
+      "label": "drain() empties the queue before send is confirmed",
+      "file": "client/src/sync/queue",
+      "any": [
+        "return\\s+pending\\s*\\.\\s*(?:slice|concat)\\s*\\(\\s*(?:0\\s*(?:,\\s*pending\\s*\\.\\s*length\\s*)?)?\\)",
+        "return\\s+pending\\s*\\.\\s*(?:map|filter|flatMap)\\s*\\(",
+        "return\\s*\\[\\s*\\.\\.\\.\\s*pending\\s*\\]",
+        "return\\s+Array\\s*\\.\\s*from\\s*\\(\\s*pending\\s*\\)",
+        "return\\s+structuredClone\\s*\\(\\s*pending\\s*\\)",
+        "return\\s+pending\\s*;",
+        "pending\\s*=\\s*\\w+\\s*\\.\\s*concat\\s*\\(\\s*pending\\s*\\)",
+        "pending\\s*=\\s*\\[\\s*\\.\\.\\.\\s*\\w+\\s*,\\s*\\.\\.\\.\\s*pending\\s*\\]",
+        "pending\\s*\\.\\s*unshift\\s*\\("
+      ],
+      "forbid": [
+        "^(?![\\s\\S]*(?:requeue|pending\\s*\\.\\s*unshift|pending\\s*=\\s*\\[\\s*\\.\\.\\.\\s*\\w+\\s*,\\s*\\.\\.\\.\\s*pending|pending\\s*=\\s*\\w+\\s*\\.\\s*concat\\s*\\(\\s*pending))[\\s\\S]*pending\\s*=\\s*\\[\\s*\\]",
+        "^(?![\\s\\S]*(?:requeue|pending\\s*\\.\\s*unshift))[\\s\\S]*pending\\s*=\\s*pending\\s*\\.\\s*slice\\s*\\(\\s*[1-9]"
+      ]
+    },
+    {
+      "key": "C",
+      "label": "reconnect stacks listeners / no backoff cap",
+      "file": "client/src/sync/connection",
+      "any": [
+        "2\\s*\\*\\*\\s*\\w+",
+        "Math\\s*\\.\\s*pow\\s*\\(\\s*2\\s*,",
+        "\\[\\s*Math\\s*\\.\\s*min\\s*\\(\\s*\\w+\\s*,\\s*\\w+\\s*\\.\\s*length",
+        "\\.\\s*on(close|message|error|open)\\s*=\\s*null",
+        "removeEventListener\\s*\\(",
+        "if\\s*\\(\\s*\\w*[Tt]imer\\w*\\s*\\)\\s*(\\{\\s*)?return\\b"
+      ],
+      "forbid": [
+        "Math\\s*\\.\\s*max\\s*\\([^;]{0,80}?(?:\\*\\*\\s*\\w|Math\\s*\\.\\s*pow\\s*\\()[^;]{0,60}?,\\s*[\\d_]{4,}\\s*\\)"
+      ]
+    },
+    {
+      "key": "D",
+      "label": "persist not awaited before ack",
+      "file": "server/hub",
+      "any": [
+        "await\\s+[^;{}]{0,100};[\\s\\S]{0,400}?(?:type:\\s*\"ack\"|\\back\\s*\\(|\\w*[Aa]ck(?:Msg|Message|Payload|Frame)\\b)",
+        "persist\\s*\\([^;]*\\)\\s*\\.\\s*then\\s*\\([\\s\\S]{0,400}?(?:type:\\s*\"ack\"|\\back\\s*\\(|\\w*[Aa]ck(?:Msg|Message|Payload|Frame)\\b)"
+      ],
+      "forbid": [
+        "void\\s+persist\\s*\\(",
+        "\\w+\\s*\\.\\s*send\\s*\\([^;]{0,160}?\"ack\"[^;]{0,80}?;\\s*await\\s+persist\\s*\\("
+      ],
+      "oracle": true
+    },
+    {
+      "key": "E",
+      "label": "opId from Math.random collides",
+      "file": "client/src/sync/useSync",
+      "any": [
+        "opId\\s*[:=]\\s*[^,;}]{0,40}?(crypto\\s*\\.\\s*)?(randomUUID|nanoid|uuidv4|ulid|cuid2?|createId)\\s*\\(",
+        "opId\\s*[:=][^;]{0,80}?(\\+\\+|\\+=\\s*1)",
+        "function\\s+(\\w+)\\s*\\([^)]*\\)[^{]*\\{[\\s\\S]{0,300}?(?:\\+\\+|\\+=\\s*1|randomUUID|nanoid\\s*\\(|getRandomValues|randomBytes|ulid\\s*\\(|cuid2?\\s*\\(|createId\\s*\\(|uuidv4\\s*\\()[\\s\\S]{0,400}?opId\\s*[:=]\\s*\\1\\s*\\(",
+        "(\\w+)\\s*(\\+\\+|\\+=\\s*1)\\s*;[\\s\\S]{0,240}?opId\\s*[:=][\\s\\S]{0,120}?\\b\\1\\b"
+      ],
+      "forbid": [
+        "opId\\s*[:=][^,;}]*Math\\s*\\.\\s*random",
+        "opId\\s*[:=]\\s*(String\\s*\\(\\s*)?Date\\s*\\.\\s*now\\s*\\(\\s*\\)\\s*\\)?\\s*[,;}]"
+      ]
+    },
+    {
+      "key": "F",
+      "label": "no cleanup on unmount, reconnect loop continues",
+      "file": "client/src/sync/useSync",
+      "all": [
+        "useEffect\\s*\\(\\s*(?:\\(\\s*\\)|function\\s*\\(\\s*\\))\\s*(?:=>\\s*)?\\{",
+        "\\}\\s*,\\s*\\[[^\\]]*\\]\\s*\\)"
+      ],
+      "any": [
+        "(?:const|let|var)\\s+(\\w+)\\s*=\\s*[^;]*;[\\s\\S]{0,600}?return\\s+(?:\\(\\s*\\)\\s*=>\\s*)?\\{?\\s*\\1\\s*(?:\\.\\s*current)?\\s*\\??\\.\\s*(?:close|abort|disconnect|destroy|stop|terminate|unsubscribe|dispose)\\s*\\(",
+        "return\\s*\\(\\s*\\)\\s*=>\\s*\\{?\\s*\\w+\\s*\\(\\s*\\)",
+        "(?:const|let|var)\\s+(\\w+)\\s*=\\s*connect\\s*\\([^;]*;\\s*return\\s+\\1\\s*;",
+        "function\\s+(\\w+)\\s*\\([^)]*\\)[^{]*\\{[\\s\\S]{0,300}?(?:close|abort|disconnect|destroy|stop|terminate|unsubscribe|dispose|removeEventListener|clearTimeout|clearInterval)\\s*\\([\\s\\S]{0,400}?return\\s+\\1\\s*[;,)}]"
+      ]
+    }
+  ]
+}

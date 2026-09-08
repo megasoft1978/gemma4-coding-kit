@@ -1,0 +1,90 @@
+{
+  "id": "api-versioning",
+  "stack": "Express + TypeScript",
+  "files": {
+    "README.md": "# api-versioning\n\nPublic REST API.\n\n- `server/routes/v1/users.ts` \u2014 the existing, frozen v1 endpoints. **v1 responses must not change.**\n- `server/serializers.ts` \u2014 shared response shaping.\n- `server/validate.ts` \u2014 shared input validation.\n\nv1 returns a user as `{ id, name, email }`.\nThe v2 shape splits the name: `{ id, firstName, lastName, email, createdAt }`.\n",
+    "package.json": "{ \"name\": \"api-versioning\", \"private\": true, \"workspaces\": [\"server\"] }\n",
+    "server/validate.ts": "export interface Query {\n  limit: number;\n  offset: number;\n}\n\nexport function parseQuery(raw: Record<string, unknown>): Query {\n  const limit = parseInt(String(raw.limit ?? \"20\"), 10);\n  const offset = parseInt(String(raw.offset ?? \"0\"), 10);\n  return { limit, offset };\n}\n",
+    "server/serializers.ts": "export interface UserRow {\n  id: number;\n  full_name: string;\n  email: string;\n  created_at: string;\n}\n\nexport function serializeV1(row: UserRow) {\n  return { id: row.id, name: row.full_name, email: row.email };\n}\n",
+    "server/routes/v1/users.ts": "import { Router } from \"express\";\nimport { parseQuery } from \"../../validate\";\nimport { serializeV1, type UserRow } from \"../../serializers\";\n\nconst ROWS: UserRow[] = [\n  { id: 1, full_name: \"Ada Lovelace\", email: \"ada@example.com\", created_at: \"2026-01-02T00:00:00Z\" },\n  { id: 2, full_name: \"Alan Turing\", email: \"alan@example.com\", created_at: \"2026-01-03T00:00:00Z\" },\n];\n\nconst router = Router();\n\nrouter.get(\"/v1/users\", (req, res) => {\n  const { limit, offset } = parseQuery(req.query as Record<string, unknown>);\n  const page = ROWS.slice(offset, offset + limit);\n  res.json({ users: page.map(serializeV1) });\n});\n\nexport default router;\n"
+  },
+  "report": "We need to ship a v2 of the users endpoint at `/v2/users`, returning each user as\n`{ id, firstName, lastName, email, createdAt }` \u2014 the full name split on the first space, with everything after\nit as the last name, and a single-word name yielding an empty last name. v1 must keep returning exactly what it\nreturns today.\n\nWhile you are in there, three existing problems have been reported:\n1. Passing `?limit=abc` returns an empty list instead of rejecting the request or falling back to the default.\n2. A caller can pass `?limit=100000` and pull the entire table in one request.\n3. A negative offset (`?offset=-5`) returns duplicated rows.",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "v2 route added",
+      "any": [
+        "\\.\\s*(get|post|put|all|use|route)\\s*\\(\\s*[\\\"'`][^\\\"'`]*/v2(/|[\\\"'`])"
+      ]
+    },
+    {
+      "key": "B",
+      "label": "v2 serializer splits name correctly",
+      "file": "server/serializ",
+      "all": [
+        "firstName",
+        "lastName"
+      ],
+      "any": [
+        "indexOf\\(\\s*([\\\"'`])\\s\\1\\s*\\)[\\s\\S]{0,300}?\\.\\s*(slice|substring|substr)\\(\\s*\\w+\\s*\\+\\s*1",
+        "\\.\\.\\.\\s*(\\w+)\\s*\\][\\s\\S]{0,300}?\\1\\s*\\.\\s*join\\(",
+        "/[^/\\n]*\\\\s[^/\\n]*/\\s*\\.\\s*(exec|match)\\(",
+        "\\.\\s*split\\(\\s*/[^/\\n]*/"
+      ],
+      "forbid": [
+        "\\[\\s*\\w+\\s*,\\s*\\w+\\s*\\]\\s*=\\s*[^;]{0,60}\\.\\s*split\\(\\s*([\\\"'`])\\s\\1"
+      ]
+    },
+    {
+      "key": "C",
+      "label": "v1 shape left untouched while v2 added",
+      "all": [
+        "(?<![A-Za-z0-9_$])name\\s*:\\s*\\w+\\.full_name\\s*,\\s*email\\s*:\\s*\\w+\\.email\\s*\\}",
+        "firstName\\s*[:=]",
+        "lastName\\s*[:=]"
+      ]
+    },
+    {
+      "key": "D",
+      "label": "NaN limit falls back to default",
+      "file": "server/validate",
+      "any": [
+        "if\\s*\\(\\s*!?\\s*(Number\\.)?is(NaN|Finite)\\s*\\(",
+        "(Number\\.)?is(NaN|Finite)\\s*\\([\\s\\S]{0,80}?\\?",
+        "parseInt\\([^;]*\\|\\|\\s*[\\w.\\\"']",
+        "[\\w.]+\\s*>\\s*0\\s*\\?",
+        "(Number\\.)?is(NaN|Finite)\\s*\\([\\s\\S]{0,80}?(\\|\\||&&)[\\s\\S]{0,80}?\\?"
+      ]
+    },
+    {
+      "key": "E",
+      "label": "limit capped",
+      "file": "server/validate",
+      "any": [
+        "\\w*[lL]imit\\w*\\s*[=:][\\s\\S]{0,120}?Math\\.min\\(",
+        "(?:[=:(,]|return|=>)\\s*[^;]{0,60}?Math\\.min\\(\\s*\\w*[lL]imit\\w*\\s*,",
+        "(?:[=:(,]|return|=>)\\s*[^;]{0,60}?Math\\.min\\([^)]*,\\s*\\w*[lL]imit\\w*\\s*\\)",
+        "\\w*[lL]imit\\w*\\s*>\\s*[\\w$.]+\\s*\\?",
+        "if\\s*\\(\\s*\\w*[lL]imit\\w*\\s*>\\s*[\\w$.]+\\s*\\)"
+      ],
+      "forbid": [
+        "Math\\.min\\([^;]{0,40}?\\b\\d{4,}\\b"
+      ]
+    },
+    {
+      "key": "F",
+      "label": "negative offset clamped",
+      "file": "server/validate",
+      "any": [
+        "\\w*[oO]ffset\\w*\\s*[=:]\\s*Math\\.max\\(",
+        "\\w*[oO]ffset\\w*\\s*[<>]\\s*0\\s*\\?",
+        "if\\s*\\(\\s*\\w*[oO]ffset\\w*\\s*<\\s*0\\s*\\)"
+      ]
+    }
+  ],
+  "valid_modes": [
+    "symptom",
+    "precise"
+  ],
+  "mode_note": "Excluded from `discover` mode: bugs A/B/C concern ADDING a v2 endpoint, which is a requirement rather than a defect. Nothing in the code implies a v2 is wanted, so those three are undiscoverable without a report. Only D/E/F (NaN limit, uncapped limit, negative offset) are inferable from the code. Discover mode can find defects; it cannot find requirements."
+}

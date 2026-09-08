@@ -1,0 +1,79 @@
+{
+  "id": "cart-checkout",
+  "stack": "React + Express + TypeScript",
+  "files": {
+    "README.md": "# cart-checkout\n\nCheckout flow.\n\n- `server/` \u2014 Express + TypeScript. Pricing in `server/pricing.ts`, routes in `server/routes/checkout.ts`.\n- `client/` \u2014 React + TypeScript. Cart state in `client/src/cart/`.\n\nPrices are integers in **cents**. Tax is applied to the discounted subtotal.\n",
+    "package.json": "{ \"name\": \"cart-checkout\", \"private\": true, \"workspaces\": [\"client\", \"server\"] }\n",
+    "server/pricing.ts": "export interface CartLine {\n  sku: string;\n  qty: number;\n  unitCents: number;\n}\n\nexport const TAX_RATE = 0.2;\n\n// Discount is a fraction, e.g. 0.1 for 10% off.\nexport function priceCart(lines: CartLine[], discount: number) {\n  const subtotal = lines.reduce((sum, l) => sum + l.unitCents * l.qty, 0);\n  const taxed = Math.round(subtotal * (1 + TAX_RATE));\n  const total = Math.round(taxed * (1 - discount));\n  return { subtotal, tax: taxed - subtotal, total };\n}\n",
+    "server/routes/checkout.ts": "import { Router } from \"express\";\nimport { priceCart, type CartLine } from \"../pricing\";\nimport { reserveStock } from \"../stock\";\n\nconst router = Router();\n\nrouter.post(\"/checkout\", async (req, res) => {\n  const lines: CartLine[] = req.body.lines ?? [];\n  const discount: number = req.body.discount ?? 0;\n\n  reserveStock(lines);\n\n  const priced = priceCart(lines, discount);\n  res.json(priced);\n});\n\nexport default router;\n",
+    "server/stock.ts": "import type { CartLine } from \"./pricing\";\n\nconst STOCK: Record<string, number> = { a: 5, b: 2 };\n\nexport async function reserveStock(lines: CartLine[]): Promise<void> {\n  for (const l of lines) {\n    const have = STOCK[l.sku] ?? 0;\n    if (have < l.qty) {\n      throw new Error(`out_of_stock:${l.sku}`);\n    }\n    STOCK[l.sku] = have - l.qty;\n  }\n}\n",
+    "client/src/cart/useCart.ts": "import { useState } from \"react\";\nimport type { CartLine } from \"../../../server/pricing\";\n\nexport function useCart() {\n  const [lines, setLines] = useState<CartLine[]>([]);\n\n  function setQty(sku: string, qty: number) {\n    const next = lines;\n    const line = next.find((l) => l.sku === sku);\n    if (line) {\n      line.qty = qty;\n    }\n    setLines(next);\n  }\n\n  return { lines, setLines, setQty };\n}\n",
+    "client/src/components/Checkout.tsx": "import React, { useState } from \"react\";\nimport { useCart } from \"../cart/useCart\";\n\nexport function Checkout() {\n  const { lines, setQty } = useCart();\n  const [total, setTotal] = useState<number | null>(null);\n  const [placing, setPlacing] = useState(false);\n\n  async function placeOrder() {\n    setPlacing(true);\n    const res = await fetch(\"/checkout\", {\n      method: \"POST\",\n      headers: { \"content-type\": \"application/json\" },\n      body: JSON.stringify({ lines, discount: 0.1 }),\n    });\n    const data = await res.json();\n    setTotal(data.total);\n    setPlacing(false);\n  }\n\n  return (\n    <div>\n      {lines.map((l) => (\n        <input\n          key={l.sku}\n          type=\"number\"\n          value={l.qty}\n          onChange={(e) => setQty(l.sku, Number(e.target.value))}\n        />\n      ))}\n      <button onClick={placeOrder}>Place order</button>\n      {total !== null && <p>Total: {(total / 100).toFixed(2)}</p>}\n    </div>\n  );\n}\n"
+  },
+  "report": "1. Changing the quantity in the cart does not update the screen \u2014 the number in the box changes but nothing\n   else reacts until an unrelated part of the page re-renders.\n2. Discounted orders are charged too much: the discount appears to be applied to the taxed amount rather than\n   the goods, so customers pay tax on money they never spent.\n3. An order for an item we do not have enough of still goes through and returns a total, and the shortage is\n   only noticed later.\n4. Clicking \"Place order\" twice quickly places two orders.\n",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "cart state mutated in place, no re-render",
+      "file": "client/src/cart/useCart",
+      "all": [
+        "setLines\\s*\\("
+      ],
+      "any": [
+        "\\.\\s*(?:map|with|toSpliced|toSorted|flatMap|reduce)\\s*(?:<[^<>;{}()]*>)?\\s*\\(",
+        "\\[\\s*\\.\\.\\.\\s*[A-Za-z_$]",
+        "structuredClone\\s*\\(",
+        "\\.\\s*(?:slice|concat)\\s*\\(",
+        "Array\\s*\\.\\s*from\\s*\\(",
+        "\\{\\s*\\.\\.\\.\\s*[A-Za-z_$][\\w$]*"
+      ],
+      "forbid": [
+        "(?:const|let|var)\\s+(\\w+)\\s*=\\s*lines\\s*;[\\s\\S]{0,500}?setLines\\(\\s*\\1\\s*[,)]",
+        "setLines\\(\\s*lines\\s*[,)]",
+        "setLines\\(\\s*\\(?\\s*(\\w+)\\s*\\)?\\s*=>\\s*\\{[\\s\\S]{0,400}?\\.\\s*qty\\s*=[\\s\\S]{0,200}?return\\s+\\1\\s*[;}]"
+      ]
+    },
+    {
+      "key": "B",
+      "label": "tax applied before discount",
+      "file": "server/pricing",
+      "all": [
+        "TAX_RATE",
+        "(?:const|let|var)\\s+\\w+\\s*=\\s*[^;]*\\bdiscount\\b"
+      ],
+      "forbid": [
+        "subtotal\\s*\\*\\s*\\(\\s*1\\s*\\+\\s*TAX_RATE\\s*\\)",
+        "subtotal\\s*\\*\\s*TAX_RATE",
+        "(?:const|let|var)\\s+(\\w+)\\s*=\\s*[^;]*\\(\\s*1\\s*\\+\\s*TAX_RATE\\s*\\)[^;]*;[\\s\\S]{0,400}?\\btotal\\s*[:=]\\s*[^;,}]*\\b\\1\\b\\s*\\*\\s*\\(?\\s*1\\s*-\\s*discount"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "C",
+      "label": "reserveStock not awaited, rejection unhandled",
+      "file": "server/routes/checkout",
+      "any": [
+        "await\\s+reserveStock\\s*\\(",
+        "await\\s+Promise\\s*\\.\\s*(?:all|allSettled)\\s*\\(\\s*\\[?[^;]{0,200}?reserveStock\\s*\\(",
+        "reserveStock\\s*\\([^;]*\\)\\s*\\.\\s*then\\s*\\("
+      ],
+      "forbid": [
+        "res\\s*\\.\\s*json\\s*\\(\\s*(?:priceCart|priced)\\b[\\s\\S]{0,200}?\\breserveStock\\s*\\("
+      ]
+    },
+    {
+      "key": "D",
+      "label": "double submit not prevented",
+      "file": "client/src/components/Checkout",
+      "any": [
+        "disabled=\\{[^}]*\\bplacing\\b",
+        "(?:const|let|var)\\s+(\\w+)\\s*=\\s*placing\\s*[;,][\\s\\S]{0,600}?disabled=\\{[^}]*\\b\\1\\b",
+        "if\\s*\\(\\s*placing\\s*\\)\\s*(?:\\{\\s*)?return[^;]*;[\\s\\S]{0,250}?(?:setPlacing\\s*\\(\\s*true|fetch\\s*\\()",
+        "if\\s*\\(\\s*(\\w+)\\s*\\.\\s*current\\s*\\)\\s*(?:\\{\\s*)?return[^;]*;[\\s\\S]{0,250}?\\1\\s*\\.\\s*current\\s*=\\s*(?!\\s*(?:null|false|undefined)\\b)",
+        "\\bplacing\\b[\\s\\S]{0,100}?\\bdisabled\\s*:\\s*true",
+        "\\bdisabled\\s*:\\s*true[\\s\\S]{0,100}?\\bplacing\\b"
+      ]
+    }
+  ],
+  "precise": "Make exactly these four changes.\n\n1. `client/src/cart/useCart.ts`, `setQty` \u2014 it assigns `const next = lines`, mutates the found line's `qty` in\n   place, and calls `setLines(next)` with the same array reference. React compares by reference, so no re-render\n   happens. Produce a new array (and a new line object) instead of mutating.\n\n2. `server/pricing.ts`, `priceCart` \u2014 it applies tax to the subtotal first and then applies the discount to the\n   already-taxed amount, so the customer pays tax on money they never spent. The documented rule is that tax\n   applies to the DISCOUNTED subtotal; reorder the arithmetic accordingly.\n\n3. `server/routes/checkout.ts` \u2014 `reserveStock(lines)` is `async` and throws for an out-of-stock item, but it is\n   called without `await`, so the rejection is unhandled and checkout returns a total anyway. Await it, and make an\n   out-of-stock failure prevent the order from being priced and returned.\n\n4. `client/src/components/Checkout.tsx` \u2014 the \"Place order\" button can be clicked repeatedly while the first\n   request is still in flight, placing duplicate orders. The `placing` state already exists; use it to block a\n   second submission."
+}

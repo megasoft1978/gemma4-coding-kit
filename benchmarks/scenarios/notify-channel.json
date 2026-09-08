@@ -1,0 +1,94 @@
+{
+  "id": "notify-channel",
+  "stack": "Node + TypeScript",
+  "files": {
+    "README.md": "# notify-service\n\nOutbound notifications.\n\n- `server/channels/email.ts` \u2014 the one existing channel.\n- `server/dispatch.ts` \u2014 picks a channel and sends.\n- `server/templates.ts` \u2014 renders a message body from a template id + vars.\n- `server/types.ts` \u2014 shared types.\n\nA channel must implement `Channel`. `dispatch` resolves the channel by name and must never throw for an unknown\nchannel \u2014 it returns a failed `SendResult` instead. Rendering an unknown template id is an error the caller sees.\n",
+    "package.json": "{ \"name\": \"notify-service\", \"private\": true, \"workspaces\": [\"server\"] }\n",
+    "server/types.ts": "export interface SendResult {\n  ok: boolean;\n  channel: string;\n  error?: string;\n}\n\nexport interface Channel {\n  readonly name: string;\n  send(to: string, subject: string, body: string): Promise<SendResult>;\n}\n\nexport interface Notification {\n  to: string;\n  channel: string;\n  templateId: string;\n  vars: Record<string, string>;\n}\n",
+    "server/templates.ts": "const TEMPLATES: Record<string, string> = {\n  welcome: \"Hello {{name}}, welcome aboard.\",\n  reset: \"Hi {{name}}, use code {{code}} to reset your password.\",\n};\n\nexport function render(templateId: string, vars: Record<string, string>): string {\n  const tpl = TEMPLATES[templateId];\n  if (!tpl) {\n    throw new Error(`unknown_template:${templateId}`);\n  }\n  return tpl.replace(/\\{\\{(\\w+)\\}\\}/g, (_m, key) => vars[key] ?? \"\");\n}\n",
+    "server/channels/email.ts": "import type { Channel, SendResult } from \"../types\";\n\nexport const emailChannel: Channel = {\n  name: \"email\",\n  async send(to, subject, body): Promise<SendResult> {\n    if (!to.includes(\"@\")) {\n      return { ok: false, channel: \"email\", error: \"invalid_address\" };\n    }\n    // pretend to hand off to an SMTP client\n    return { ok: true, channel: \"email\" };\n  },\n};\n",
+    "server/dispatch.ts": "import type { Notification, SendResult } from \"./types\";\nimport { emailChannel } from \"./channels/email\";\nimport { render } from \"./templates\";\n\nconst CHANNELS = [emailChannel];\n\nexport async function dispatch(n: Notification): Promise<SendResult> {\n  const channel = CHANNELS.find((c) => c.name === n.channel);\n  if (!channel) {\n    return { ok: false, channel: n.channel, error: \"unknown_channel\" };\n  }\n  const body = render(n.templateId, n.vars);\n  return channel.send(n.to, n.templateId, body);\n}\n"
+  },
+  "report": "We need to add an **SMS channel** alongside the existing email channel.\n\nRequirements:\n1. A new `server/channels/sms.ts` exporting an `smsChannel` that implements the same `Channel` interface as\n   `emailChannel`, with `name` set to `\"sms\"`.\n2. It must validate the destination: an SMS address is a phone number in E.164 form (a `+` followed by 8 to 15\n   digits). Anything else returns a failed `SendResult` with error `\"invalid_number\"` \u2014 it must not throw.\n3. SMS bodies are hard-capped at 160 characters. A longer rendered body must be truncated to 160 characters\n   rather than rejected.\n4. Register it in `dispatch` so `channel: \"sms\"` resolves to it. Adding a channel must not change how `\"email\"`\n   behaves, and an unknown channel must still return `unknown_channel` rather than throwing.\n\nAlso: `dispatch` currently lets a rendering failure escape as an exception. An unknown template id should come\nback as a failed `SendResult` with error `unknown_template`, consistent with how unknown channels are handled.\n",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "sms channel module created",
+      "all": [
+        "channels/sms(?:\\.ts)?\\b",
+        "\\bname\\s*[:=]\\s*[\"'`]sms[\"'`]",
+        "\\bsend\\s*[:(]"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "B",
+      "label": "E.164 validation",
+      "file": "server/channels/sms",
+      "all": [
+        "\\^\\\\\\+(?!\\?)|startsWith\\(\\s*[\"'`]\\+[\"'`]\\s*\\)|\\[\\s*0\\s*\\]\\s*[!=]==?\\s*[\"'`]\\+[\"'`]|charAt\\(\\s*0\\s*\\)\\s*[!=]==?\\s*[\"'`]\\+[\"'`]",
+        "\\{\\s*8\\s*,\\s*15\\s*\\}|\\{\\s*7\\s*,\\s*14\\s*\\}|>=?\\s*8\\b[\\s\\S]{0,80}<=?\\s*1[56]\\b|length\\s*<\\s*8\\b[\\s\\S]{0,80}length\\s*>\\s*15\\b"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "C",
+      "label": "invalid_number returned not thrown",
+      "file": "server/channels/sms",
+      "all": [
+        "[\"'`]invalid_number[\"'`]",
+        "return\\s*\\{\\s*ok\\s*:\\s*false|return\\s+[A-Za-z_$][\\w$]*\\s*\\(\\s*[\"'`]invalid_number[\"'`]"
+      ],
+      "forbid": [
+        "throw\\s+(new\\s+\\w*Error\\s*\\(\\s*)?[\"'`][^\"'`]*invalid_number"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "D",
+      "label": "160-char truncation",
+      "file": "server/channels/sms",
+      "all": [
+        "(?:slice|substring|substr)\\s*\\(\\s*0\\s*,\\s*(?:160|[A-Z_][A-Z0-9_]*)\\s*\\)\\s*[;,).:\\]}]",
+        "\\b160\\b"
+      ],
+      "forbid": [
+        "length\\s*>=?\\s*(?:160|161)[^?]{0,60}ok\\s*:\\s*false"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "E",
+      "label": "registered in dispatch CHANNELS",
+      "file": "server/dispatch",
+      "all": [
+        "=\\s*\\[[^\\]]{0,200}smsChannel|\\[\\s*smsChannel\\b|,\\s*smsChannel\\s*\\]|\\.push\\(\\s*smsChannel|[\"'`]?sms[\"'`]?\\s*:\\s*smsChannel",
+        "import\\s*\\{[^}]*smsChannel[^}]*\\}|\\.find\\s*\\(|\\.get\\s*\\(|\\bCHANNELS\\s*\\[|\\[\\s*n\\.channel\\s*\\]|\\.push\\s*\\("
+      ],
+      "oracle": true
+    },
+    {
+      "key": "F",
+      "label": "render failure returned as unknown_template result",
+      "file": "server/dispatch",
+      "all": [
+        "[\"'`]unknown_template[\"'`]",
+        "return\\s*\\{\\s*ok\\s*:\\s*false"
+      ],
+      "any": [
+        "\\bcatch\\s*[({]",
+        "if\\s*\\(\\s*!\\s*[A-Za-z_$][\\w$]*\\s*\\(",
+        "[!=]==?\\s*null\\b",
+        "[!=]==?\\s*undefined\\b"
+      ],
+      "oracle": true
+    }
+  ],
+  "valid_modes": [
+    "symptom",
+    "precise"
+  ],
+  "mode_note": "Additive scenario: five of six items are new functionality specified by a requirement, not defects inferable from the code, so `discover` mode does not apply.",
+  "discriminating": false,
+  "discrimination_note": "All six models scored 6/6 on first run (2026-09-08), including CoderX-27B which scores 21% at discover. This scenario does not discriminate between models and must not be used for ranking. Kept as a floor check: a model failing here is broken. Writing new code against a clear spec is not where these models differ.\n\nSUPERSEDED 2026-09-08 (first time): the adversarial audit showed the original 6/6 scores were a grader artifact -- prose-only answers passed 5 of 6 items. The rules were rewritten (file-scoped, all/forbid) and still scored 6/6, so the discrimination question was reopened pending a stronger check.\n\nSETTLED 2026-09-08 (second time): the scenario was converted to an executable oracle (datasets/multifile_tasks/oracle/notify-channel/test/run.mjs, real Node execution via --experimental-strip-types, no dependencies). The oracle rejects the exact prose-only decoy that fooled the original regex (verified directly: a TODO-body implementation mentioning every requirement scores 0/6 here). Re-graded against it, all six models still score 6/6, and hand-verification of the weakest model (Qwen2.5-Coder-14B, 21% discover) shows a genuinely correct implementation. The 6/6 result is real: this is a ground-truth floor check, not a grader artifact. Confirmed non-discriminating by construction."
+}

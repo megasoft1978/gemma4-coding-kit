@@ -1,0 +1,88 @@
+{
+  "id": "orders-dashboard",
+  "stack": "React + Express + TypeScript",
+  "files": {
+    "README.md": "# orders-dashboard\n\nInternal order browser.\n\n- `server/` \u2014 Express + TypeScript API. Entry `server/index.ts`, routes in `server/routes/`,\n  business logic in `server/services/`, middleware in `server/middleware/`.\n- `client/` \u2014 React + TypeScript UI. `client/src/lib/` (api client), `hooks/`, `components/`.\n- `shared/` \u2014 types shared by both sides.\n\nMoney is stored and returned in the API as a **decimal number of euros** (e.g. `12.30`).\n",
+    "package.json": "{\n  \"name\": \"orders-dashboard\",\n  \"private\": true,\n  \"workspaces\": [\"client\", \"server\", \"shared\"]\n}\n",
+    "shared/types.ts": "export interface OrderLine {\n  sku: string;\n  qty: number;\n  unitPrice: number;\n}\n\nexport interface Order {\n  id: string;\n  userId: string;\n  placedAt: string; // ISO timestamp\n  lines: OrderLine[];\n  total: number;\n}\n",
+    "server/index.ts": "import express from \"express\";\nimport ordersRouter from \"./routes/orders\";\nimport { requireUser } from \"./middleware/requireUser\";\nimport { errorHandler } from \"./middleware/errorHandler\";\n\nconst app = express();\napp.use(express.json());\n\napp.use(ordersRouter);\napp.use(requireUser);\n\napp.use(errorHandler);\n\napp.listen(3001, () => console.log(\"api on :3001\"));\n\nexport default app;\n",
+    "server/middleware/requireUser.ts": "import type { Request, Response, NextFunction } from \"express\";\n\ndeclare global {\n  namespace Express {\n    interface Request {\n      user?: { id: string };\n    }\n  }\n}\n\n// Attaches the authenticated user to the request. Every order query must be scoped to req.user.id.\nexport function requireUser(req: Request, res: Response, next: NextFunction) {\n  const userId = req.header(\"x-user-id\");\n  if (!userId) {\n    return res.status(401).json({ error: \"unauthenticated\" });\n  }\n  req.user = { id: userId };\n  next();\n}\n",
+    "server/middleware/errorHandler.ts": "import type { Request, Response, NextFunction } from \"express\";\n\n// eslint-disable-next-line @typescript-eslint/no-unused-vars\nexport function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction) {\n  console.error(err);\n  res.status(500).json({ error: \"internal_error\" });\n}\n",
+    "server/services/orderService.ts": "import type { Order } from \"../../shared/types\";\n\nconst ORDERS: Order[] = [\n  { id: \"o1\", userId: \"u1\", placedAt: \"2026-09-06T23:40:00.000Z\", lines: [{ sku: \"a\", qty: 3, unitPrice: 0.1 }], total: 0 },\n  { id: \"o2\", userId: \"u2\", placedAt: \"2026-09-07T09:00:00.000Z\", lines: [{ sku: \"b\", qty: 1, unitPrice: 12.3 }], total: 0 },\n];\n\nexport function computeTotal(order: Order): number {\n  let total = 0;\n  for (const line of order.lines) {\n    total += line.unitPrice * line.qty;\n  }\n  return total;\n}\n\n// Orders placed \"today\", in the operator's local timezone.\nexport function ordersPlacedToday(userId: string): Order[] {\n  const today = new Date().toISOString().slice(0, 10);\n  return ORDERS.filter((o) => o.userId === userId && o.placedAt.slice(0, 10) === today);\n}\n\nexport async function loadOrders(userId: string): Promise<Order[]> {\n  const rows = ORDERS.filter((o) => o.userId === userId);\n  return rows.map((o) => ({ ...o, total: computeTotal(o) }));\n}\n",
+    "server/routes/orders.ts": "import { Router } from \"express\";\nimport { loadOrders, ordersPlacedToday } from \"../services/orderService\";\n\nconst router = Router();\n\nrouter.get(\"/orders\", async (req, res) => {\n  const orders = await loadOrders(req.user!.id);\n  res.json({ orders });\n});\n\nrouter.get(\"/orders/today\", (req, res) => {\n  res.json({ orders: ordersPlacedToday(req.user!.id) });\n});\n\nexport default router;\n",
+    "client/src/lib/api.ts": "import type { Order } from \"../../../shared/types\";\n\nexport async function fetchOrders(filter: { from?: string; to?: string }): Promise<Order[]> {\n  const params = new URLSearchParams();\n  if (filter.from) params.set(\"from\", filter.from);\n  if (filter.to) params.set(\"to\", filter.to);\n  const res = await fetch(`/orders?${params.toString()}`);\n  const data = await res.json();\n  return data.orders;\n}\n",
+    "client/src/hooks/useOrders.ts": "import { useEffect, useState } from \"react\";\nimport type { Order } from \"../../../shared/types\";\nimport { fetchOrders } from \"../lib/api\";\n\nexport function useOrders(filter: { from?: string; to?: string }) {\n  const [orders, setOrders] = useState<Order[]>([]);\n  const [loading, setLoading] = useState(false);\n\n  useEffect(() => {\n    setLoading(true);\n    fetchOrders(filter)\n      .then(setOrders)\n      .finally(() => setLoading(false));\n  }, [filter]);\n\n  return { orders, loading };\n}\n",
+    "client/src/components/OrderTable.tsx": "import React from \"react\";\nimport { useOrders } from \"../hooks/useOrders\";\n\nexport function OrderTable({ from, to }: { from?: string; to?: string }) {\n  const { orders, loading } = useOrders({ from, to });\n\n  if (loading) return <p>Loading\u2026</p>;\n\n  return (\n    <table>\n      <tbody>\n        {orders.map((o) => (\n          <tr key={o.id}>\n            <td>{o.id}</td>\n            <td>{o.placedAt}</td>\n            <td>\u20ac{o.total.toFixed(2)}</td>\n          </tr>\n        ))}\n      </tbody>\n    </table>\n  );\n}\n"
+  },
+  "report": "1. The orders table sometimes spins on \"Loading\u2026\" forever and the network tab shows the request never\n   completing normally \u2014 it happens when the backend hits an unexpected condition rather than on every request.\n2. Order totals are occasionally wrong by a fraction of a cent \u2014 an order of 3 items at \u20ac0.10 shows as \u20ac0.30 in\n   some places but the arithmetic drifts once more lines are added.\n3. Orders placed late in the evening do not appear under \"today\" until the following morning.\n4. A user reports they can see orders belonging to a different user.\n5. Opening the orders page fires an endless stream of identical requests to /orders \u2014 the network tab never\n   settles, and the UI re-renders continuously.\n",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "async route errors never reach error handler",
+      "file": "server/routes/orders",
+      "any": [
+        "catch\\s*\\(\\s*\\w+\\s*\\)\\s*\\{[^}]{0,300}next\\s*\\(",
+        "\\.catch\\(\\s*next\\s*\\)",
+        "\\.catch\\(\\s*(?:\\([^)]*\\)|\\w+)\\s*=>\\s*[^;]{0,120}?next\\s*\\(",
+        "\\.then\\([\\s\\S]{0,200}?,\\s*next\\s*\\)",
+        "express-async-errors"
+      ]
+    },
+    {
+      "key": "B",
+      "label": "float money arithmetic",
+      "file": "server/services/orderService",
+      "any": [
+        "\\*\\s*100\\b[\\s\\S]{0,400}?/\\s*100\\b",
+        "(?:Number|parseFloat)\\s*\\(\\s*[\\w.$\\[\\]]+\\.toFixed\\(\\s*2\\s*\\)",
+        "\\.toFixed\\(\\s*2\\s*\\)[\\s\\S]{0,200}?(?:Number|parseFloat)\\s*\\(",
+        "[+-]\\s*[\\w.$]+\\.toFixed\\(\\s*2\\s*\\)"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "C",
+      "label": "UTC vs local date boundary for 'today'",
+      "file": "server/services/orderService",
+      "any": [
+        "getFullYear\\(\\)[\\s\\S]{0,300}?getMonth\\(\\)[\\s\\S]{0,300}?getDate\\(\\)",
+        "getTimezoneOffset\\(\\)",
+        "(?:toLocaleDateString|Intl\\s*\\.\\s*DateTimeFormat)\\s*\\(\\s*[\"'](?:sv|lt|en-CA|fr-CA|ja|hu|ko|zh-Hans|af)",
+        "(?:toLocaleDateString|toLocaleString|Intl\\s*\\.\\s*DateTimeFormat)\\s*\\(\\s*[\"'][A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})*[\"'][\\s\\S]{0,300}?\\.\\s*(?:split|reverse|match|replace)\\s*\\(",
+        "formatToParts\\s*\\([\\s\\S]{0,300}?(?:year|day)\\b"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "D",
+      "label": "requireUser registered after routes (data leak)",
+      "file": "server",
+      "any": [
+        "app\\.use\\(\\s*(?:[\"'][^\"']*[\"']\\s*,\\s*)?requireUser\\s*\\)[\\s\\S]{0,300}?app\\.use\\(\\s*(?:[\"'][^\"']*[\"']\\s*,\\s*)?\\w*[Rr]outer\\b",
+        "app\\.use\\(\\s*(?:[\"'][^\"']*[\"']\\s*,\\s*)?requireUser\\s*,\\s*[\\s\\S]{0,120}?\\w*[Rr]outer\\b",
+        "router\\.use\\(\\s*requireUser\\s*\\)[\\s\\S]{0,600}?router\\.(?:get|post|put|delete|patch|all|use)\\(",
+        "router\\.(?:get|post|put|delete|patch|all)\\(\\s*[\"'][^\"']*[\"']\\s*,\\s*requireUser\\s*,"
+      ],
+      "forbid": [
+        "^(?![\\s\\S]*(?:app\\s*\\.\\s*use\\s*\\([^)]*requireUser|router\\s*\\.\\s*use\\s*\\(\\s*requireUser))[\\s\\S]*router\\s*\\.\\s*(?:get|post|put|delete|patch)\\s*\\(\\s*[\"'][^\"']*[\"']\\s*,\\s*(?:async\\s*)?(?:\\(|function\\b)"
+      ]
+    },
+    {
+      "key": "E",
+      "label": "unstable filter object causes infinite refetch",
+      "file": "client/src",
+      "forbid": [
+        "useEffect\\(\\s*(?:\\([^)]*\\)|\\w+)\\s*=>[\\s\\S]{0,400}?\\[[^\\]]{0,200}(?<![\\w$.])filter\\s*(?:,|\\])",
+        "useMemo\\([\\s\\S]{0,200}?,\\s*\\[\\s*\\{"
+      ],
+      "any": [
+        "useDeepCompareEffect|use-deep-compare",
+        "useMemo\\(",
+        "useRef\\(",
+        "JSON\\.stringify\\(",
+        "useEffect\\(\\s*(?:\\([^)]*\\)|\\w+)\\s*=>[\\s\\S]{0,400}?,\\s*\\[\\s*[\\w$]+(?:\\.[\\w$]+)*(?:\\s*,\\s*[\\w$]+(?:\\.[\\w$]+)*)*\\s*\\]"
+      ]
+    }
+  ],
+  "precise": "Make exactly these five changes.\n\n1. `server/routes/orders.ts` \u2014 the `GET /orders` handler is `async`. If the awaited call rejects, Express 4 does\n   not forward that rejection to the error middleware, so the request never completes and the client hangs. Make\n   async rejections reach the existing `errorHandler` (catch and pass to `next`).\n\n2. `server/services/orderService.ts`, `computeTotal` \u2014 it accumulates `unitPrice * qty` as floating-point euros,\n   which drifts (3 x 0.1 is not exactly 0.3). Compute the total so the returned value is exact to the cent.\n\n3. `server/services/orderService.ts`, `ordersPlacedToday` \u2014 `today` is derived from `new Date().toISOString()`,\n   which is UTC, but the function is documented to mean the operator's LOCAL day, so orders placed late in the\n   local evening fall into the wrong day. Build the local date as a `yyyy-mm-dd` string so it still compares\n   correctly against `placedAt.slice(0, 10)`, which is in that format.\n\n4. `server/index.ts` \u2014 `app.use(ordersRouter)` is registered BEFORE `app.use(requireUser)`, so `req.user` is\n   undefined inside the routes and order queries are not scoped to the signed-in user. Register `requireUser`\n   before the router so every order route runs behind it.\n\n5. `client/src/hooks/useOrders.ts` \u2014 the effect depends on `[filter]`, and `filter` is a fresh object literal\n   built on every render by `OrderTable`, so the dependency is a new reference each time and the effect refires\n   endlessly. Depend on stable values rather than the object identity."
+}

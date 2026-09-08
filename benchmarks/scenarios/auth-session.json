@@ -1,0 +1,73 @@
+{
+  "id": "auth-session",
+  "stack": "React + Express + TypeScript",
+  "files": {
+    "README.md": "# auth-session\n\nSession handling for the admin console.\n\n- `server/` \u2014 Express + TypeScript. Token issuing in `server/auth/`, routes in `server/routes/`.\n- `client/` \u2014 React + TypeScript. Session state in `client/src/auth/`.\n\nAccess tokens are short-lived; the client refreshes them before expiry.\n",
+    "package.json": "{ \"name\": \"auth-session\", \"private\": true, \"workspaces\": [\"client\", \"server\"] }\n",
+    "server/auth/tokens.ts": "import crypto from \"node:crypto\";\n\nexport interface TokenPayload {\n  sub: string;\n  exp: number; // seconds since epoch\n}\n\nconst SECRET = process.env.TOKEN_SECRET ?? \"dev-secret\";\n\nexport function issueToken(userId: string, ttlSeconds = 900): string {\n  const payload: TokenPayload = { sub: userId, exp: Math.floor(Date.now() / 1000) + ttlSeconds };\n  const body = Buffer.from(JSON.stringify(payload)).toString(\"base64url\");\n  const sig = crypto.createHmac(\"sha256\", SECRET).update(body).digest(\"base64url\");\n  return `${body}.${sig}`;\n}\n\nexport function verifyToken(token: string): TokenPayload | null {\n  const [body, sig] = token.split(\".\");\n  if (!body || !sig) return null;\n  const expected = crypto.createHmac(\"sha256\", SECRET).update(body).digest(\"base64url\");\n  if (sig !== expected) return null;\n  const payload = JSON.parse(Buffer.from(body, \"base64url\").toString()) as TokenPayload;\n  if (payload.exp < Date.now()) return null;\n  return payload;\n}\n",
+    "server/routes/session.ts": "import { Router } from \"express\";\nimport { issueToken, verifyToken } from \"../auth/tokens\";\n\nconst router = Router();\n\nrouter.post(\"/session\", (req, res) => {\n  const { userId, password } = req.body ?? {};\n  if (!userId || !password) return res.status(400).json({ error: \"missing_credentials\" });\n  res.json({ token: issueToken(userId) });\n});\n\nrouter.post(\"/session/refresh\", (req, res) => {\n  const token = String(req.header(\"authorization\") ?? \"\").replace(\"Bearer \", \"\");\n  const payload = verifyToken(token);\n  if (!payload) return res.status(401).json({ error: \"invalid_token\" });\n  res.json({ token: issueToken(payload.sub) });\n});\n\nexport default router;\n",
+    "client/src/auth/session.ts": "export interface Session {\n  token: string;\n  userId: string;\n}\n\nlet current: Session | null = null;\n\nexport function getSession(): Session | null {\n  return current;\n}\n\nexport function setSession(s: Session | null) {\n  current = s;\n  if (s) {\n    localStorage.setItem(\"session\", JSON.stringify(s));\n  } else {\n    localStorage.removeItem(\"session\");\n  }\n}\n\nexport async function refresh(): Promise<void> {\n  const s = getSession();\n  if (!s) return;\n  const res = await fetch(\"/session/refresh\", {\n    method: \"POST\",\n    headers: { authorization: `Bearer ${s.token}` },\n  });\n  const data = await res.json();\n  setSession({ ...s, token: data.token });\n}\n",
+    "client/src/auth/useAutoRefresh.ts": "import { useEffect } from \"react\";\nimport { refresh } from \"./session\";\n\n// Refresh the access token every 10 minutes while the app is open.\nexport function useAutoRefresh() {\n  useEffect(() => {\n    const id = setInterval(() => {\n      refresh();\n    }, 10 * 60 * 1000);\n  }, []);\n}\n",
+    "client/src/components/LoginForm.tsx": "import React, { useState } from \"react\";\nimport { setSession } from \"../auth/session\";\n\nexport function LoginForm() {\n  const [userId, setUserId] = useState(\"\");\n  const [password, setPassword] = useState(\"\");\n  const [error, setError] = useState<string | null>(null);\n\n  async function submit(e: React.FormEvent) {\n    e.preventDefault();\n    const res = await fetch(\"/session\", {\n      method: \"POST\",\n      headers: { \"content-type\": \"application/json\" },\n      body: JSON.stringify({ userId, password }),\n    });\n    const data = await res.json();\n    setSession({ token: data.token, userId });\n  }\n\n  return (\n    <form onSubmit={submit}>\n      <input value={userId} onChange={(e) => setUserId(e.target.value)} placeholder=\"user\" />\n      <input value={password} type=\"password\" onChange={(e) => setPassword(e.target.value)} />\n      {error && <p>{error}</p>}\n      <button type=\"submit\">Sign in</button>\n    </form>\n  );\n}\n"
+  },
+  "report": "1. Every token is rejected as expired the moment it is issued \u2014 nobody can stay signed in.\n2. Signing in with a wrong password still succeeds and returns a token.\n3. After navigating away from a page that uses auto-refresh, the refresh keeps firing forever; opening and\n   closing that screen a few times results in several refreshes per cycle.\n4. If the login request fails, the screen shows nothing at all \u2014 no message, and the user is left staring at\n   the form wondering whether it worked.\n5. Reloading the browser tab signs the user out, even though the session was saved.\n",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "token expiry compares seconds against milliseconds",
+      "file": "server/auth/tokens",
+      "any": [
+        "\\bexp\\b\\s*[<>]=?\\s*(?:Math\\.(?:floor|round|trunc)\\s*\\()?\\s*Date\\.now\\(\\)\\s*/\\s*1000",
+        "\\bexp\\b\\s*\\*\\s*1000[\\s\\S]{0,140}?(?:Date\\.now\\(\\)|new Date\\(\\))",
+        "Date\\.now\\(\\)\\s*/\\s*1000[\\s\\S]{0,140}?\\bexp\\b\\s*[<>]=?\\s*[A-Za-z_$][\\w$]*"
+      ],
+      "all": [
+        "\\)\\s*\\{?\\s*return\\s+(?:null|undefined)\\b|\\)\\s*\\{?\\s*throw\\s"
+      ],
+      "forbid": [
+        "\\bexp\\b\\s*[<>]=?\\s*(?:Math\\.(?:floor|round|trunc)\\s*\\()?\\s*Date\\.now\\(\\)\\s*(?!\\s*[*/])",
+        "Date\\.now\\(\\)\\s*\\*\\s*1000"
+      ],
+      "oracle": true
+    },
+    {
+      "key": "B",
+      "label": "password never actually verified",
+      "file": "server/routes/session",
+      "all": [
+        "res(?:ponse)?\\s*\\.\\s*(?:status|sendStatus)\\s*\\(\\s*401\\s*\\)|statusCode\\s*=\\s*401",
+        "\\w*(?i:password|passwd|pwd)\\w*\\s*[!=]==?\\s*(?!undefined\\b|null\\b|\\\"\\\"|'')[\\w$.\\\"'\\[\\]]|[\\w$.\\\"'\\[\\]]+\\s*[!=]==?\\s*\\w*(?i:password|passwd|pwd)\\w*|(?:bcrypt|argon2|scrypt)\\w*\\s*\\.\\s*(?:compare|verify)\\s*\\(|timingSafeEqual\\s*\\("
+      ]
+    },
+    {
+      "key": "C",
+      "label": "setInterval never cleared on unmount",
+      "file": "client/src/auth/useAutoRefresh",
+      "any": [
+        "return\\s*(?:\\(\\s*\\)|[\\w$]+)\\s*=>\\s*\\{?[^;]{0,80}?(?:window\\s*\\.\\s*)?clear(?:Interval|Timeout)\\s*\\(\\s*[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[\\w$]+)?\\s*\\)",
+        "([\\w$]*(?i:cancel|stop|abort|dispos|unmount|mounted)[\\w$]*)\\b[\\s\\S]{0,400}?return\\s*(?:\\(\\s*\\)|[\\w$]+)\\s*=>\\s*\\{[^;]{0,60}?\\b\\1\\s*=\\s*(?:true|false)\\b",
+        "return\\s*(?:\\(\\s*\\)|[\\w$]+)\\s*=>\\s*\\{?[^;]{0,80}?[\\w$]+\\s*\\.\\s*abort\\s*\\(\\s*\\)"
+      ]
+    },
+    {
+      "key": "D",
+      "label": "login failure never surfaced to the user",
+      "file": "client/src/components/LoginForm",
+      "all": [
+        "!\\s*res(?:ponse)?\\s*\\.\\s*ok\\b|res(?:ponse)?\\s*\\.\\s*ok\\s*===?\\s*false|res(?:ponse)?\\s*\\.\\s*status(?:Code)?\\s*(?:!==?|===?|>=|>|<)\\s*\\d{3}|!\\s*[\\w$]+(?:\\s*\\.\\s*[\\w$]+)*\\s*\\.\\s*token\\b|!\\s*ok\\b|catch\\s*\\(",
+        "set[\\w$]*(?i:error|message|failure|problem|alert|toast|notice)[\\w$]*\\s*\\(\\s*(?!(?:null|undefined|\\\"\\\"|'')\\s*\\))"
+      ]
+    },
+    {
+      "key": "E",
+      "label": "saved session never restored on load",
+      "file": "client/src/auth/session",
+      "any": [
+        "(?:let|const|var)\\s+current\\b[^=;]*=\\s*[^;]{0,140}?(?:JSON\\.parse|localStorage)",
+        "\\bcurrent\\s*=\\s*[^;]{0,140}?JSON\\.parse",
+        "JSON\\.parse[\\s\\S]{0,400}?(?:let|const|var)\\s+current\\b[^=;]*=\\s*[A-Za-z_$][\\w$]*\\s*\\("
+      ]
+    }
+  ],
+  "precise": "Make exactly these five changes.\n\n1. `server/auth/tokens.ts`, `verifyToken` \u2014 `payload.exp` is stored in SECONDS since the epoch, but it is compared\n   against `Date.now()`, which is MILLISECONDS. Every token therefore looks already expired. Compare both sides in\n   the same unit.\n\n2. `server/routes/session.ts`, `POST /session` \u2014 the handler checks only that `password` is non-empty and then\n   issues a token, so any password succeeds. Reject an incorrect password with HTTP 401. There is no user store in\n   this codebase; introduce a single explicit expected value and compare against it.\n\n3. `client/src/auth/useAutoRefresh.ts` \u2014 the `setInterval` created in `useEffect` is never cleared, so each mount\n   leaves another timer running forever. Clear it when the effect is torn down.\n\n4. `client/src/components/LoginForm.tsx` \u2014 `submit` never checks `res.ok` and never sets the `error` state that is\n   already declared and already rendered, so a failed login shows the user nothing. Set that error state when the\n   request fails.\n\n5. `client/src/auth/session.ts` \u2014 `setSession` writes to `localStorage`, but nothing ever reads it back, so the\n   in-memory `current` starts as `null` after a page reload and the user appears signed out. Restore the persisted\n   session on load."
+}

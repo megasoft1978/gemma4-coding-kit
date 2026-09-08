@@ -1,0 +1,69 @@
+{
+  "id": "items-search",
+  "stack": "React + Express + TypeScript",
+  "files": {
+    "package.json": "{\n  \"name\": \"items-app\",\n  \"private\": true,\n  \"workspaces\": [\"client\", \"server\"],\n  \"scripts\": { \"dev\": \"npm run dev --workspaces\" }\n}\n",
+    "README.md": "# items-app\n\nSearchable, paginated item browser.\n\n- `server/` \u2014 Express + TypeScript API (`server/routes/`)\n- `client/` \u2014 React + TypeScript UI (`client/src/hooks/`, `client/src/components/`)\n\n`GET /items?page=1&pageSize=10&q=<search>&sort=name` \u2014 page is 1-indexed.\n",
+    "server/package.json": "{ \"name\": \"server\", \"version\": \"1.0.0\", \"main\": \"index.ts\", \"dependencies\": { \"express\": \"^4.19.2\" } }\n",
+    "server/routes/items.ts": "import { Router } from \"express\";\n\nexport interface Item {\n  id: number;\n  name: string;\n  createdAt: number;\n}\n\n// Seeded in id order. Treated as the canonical store for the lifetime of the process.\nconst ITEMS: Item[] = Array.from({ length: 47 }, (_, i) => ({\n  id: i,\n  name: `Item ${String(i).padStart(2, \"0\")}`,\n  createdAt: Date.now() - i * 1000,\n}));\n\nconst router = Router();\n\nrouter.get(\"/items\", (req, res) => {\n  const page = parseInt(String(req.query.page ?? \"1\"), 10);\n  const pageSize = parseInt(String(req.query.pageSize ?? \"10\"), 10);\n  const q = String(req.query.q ?? \"\").trim().toLowerCase();\n  const sort = String(req.query.sort ?? \"\");\n\n  let result = ITEMS;\n  if (q) {\n    result = result.filter((it) => it.name.toLowerCase().includes(q));\n  }\n  if (sort === \"name\") {\n    result = result.sort((a, b) => a.name.localeCompare(b.name));\n  }\n\n  const start = (page - 1) * pageSize;\n  const slice = result.slice(start, start + pageSize);\n\n  res.json({ items: slice, page, pageSize, totalCount: result.length });\n});\n\nexport default router;\n",
+    "client/package.json": "{ \"name\": \"client\", \"version\": \"1.0.0\", \"dependencies\": { \"react\": \"^18.3.1\", \"react-dom\": \"^18.3.1\" } }\n",
+    "client/src/hooks/useItems.ts": "import { useEffect, useState } from \"react\";\n\nexport interface Item {\n  id: number;\n  name: string;\n  createdAt: number;\n}\n\ninterface ItemsResponse {\n  items: Item[];\n  page: number;\n  pageSize: number;\n  total: number;\n}\n\nexport function useItems(page: number, pageSize: number, query: string) {\n  const [items, setItems] = useState<Item[]>([]);\n  const [total, setTotal] = useState(0);\n  const [loading, setLoading] = useState(false);\n\n  useEffect(() => {\n    setLoading(true);\n    fetch(`/items?page=${page}&pageSize=${pageSize}&q=${encodeURIComponent(query)}`)\n      .then((r) => r.json())\n      .then((data: ItemsResponse) => {\n        setItems(data.items);\n        setTotal(data.total);\n      })\n      .finally(() => setLoading(false));\n  }, [page, pageSize, query]);\n\n  return { items, total, loading };\n}\n",
+    "client/src/components/ItemList.tsx": "import React, { useState } from \"react\";\nimport { useItems } from \"../hooks/useItems\";\n\nexport function ItemList() {\n  const [page, setPage] = useState(1);\n  const [query, setQuery] = useState(\"\");\n  const pageSize = 10;\n  const { items, total, loading } = useItems(page, pageSize, query);\n\n  return (\n    <div>\n      <input\n        value={query}\n        placeholder=\"Search items\"\n        onChange={(e) => setQuery(e.target.value)}\n      />\n      <p>\n        Showing {items.length} of {total} items\n      </p>\n      <ul>\n        {items.map((item) => (\n          <li key={item.id}>{item.name}</li>\n        ))}\n      </ul>\n      <button onClick={() => setPage(page - 1)} disabled={page === 1 || loading}>\n        Prev\n      </button>\n      <button onClick={() => setPage(page + 1)} disabled={loading}>\n        Next\n      </button>\n    </div>\n  );\n}\n"
+  },
+  "report": "1. After using the search box once, the item order changes permanently \u2014 even after clearing the search, items no longer appear in their original order.\n2. The counter always reads \"Showing 10 of undefined items\" instead of a real number.\n3. Typing quickly in the search box sometimes leaves results from an earlier keystroke on screen.\n4. If I am on page 4 and then type a search term, I get an empty list instead of the first page of matches.",
+  "bugs": [
+    {
+      "key": "A",
+      "label": "mutating sort of shared store",
+      "file": "server/routes/items",
+      "all": ["\\.(sort|toSorted)\\("],
+      "any": [
+        "\\[\\s*\\.\\.\\.[A-Za-z_$][\\w$]*\\s*\\]",
+        "\\.slice\\(\\s*\\)",
+        "\\.concat\\(",
+        "Array\\.from\\(\\s*[A-Za-z_$][\\w$]*\\s*[,)]",
+        "\\.toSorted\\("
+      ],
+      "forbid": [
+        "\\b([A-Za-z_$][\\w$]*)\\s*=\\s*[A-Za-z_$][\\w$]*\\s*\\.sort\\(",
+        "\\b[A-Z][A-Z_0-9]{2,}\\s*\\.sort\\("
+      ]
+    },
+    {
+      "key": "B",
+      "label": "totalCount/total contract mismatch",
+      "file": ["server/routes/items", "client/src/hooks/useItems"],
+      "any": [
+        "\\A(?=[\\s\\S]*res\\.json\\(\\s*\\{[^}]*?\\btotal\\s*[:,}])(?![\\s\\S]*(?:set[A-Z]\\w*\\(\\s*[\\w.$]*\\btotalCount\\b|return\\s+[\\w.$]*\\btotalCount\\b|\\{[^{}]*,\\s*totalCount\\s*\\}))",
+        "\\A(?=[\\s\\S]*(?:set[A-Z]\\w*\\(\\s*[\\w.$]*\\btotalCount\\b|return\\s+[\\w.$]*\\btotalCount\\b|\\{[^{}]*,\\s*totalCount\\s*\\}))(?![\\s\\S]*res\\.json\\(\\s*\\{[^}]*?\\btotal\\s*[:,}])"
+      ]
+    },
+    {
+      "key": "C",
+      "label": "stale-response guard on fetch",
+      "file": "client/src/hooks/useItems",
+      "any": [
+        "signal\\s*:[\\s\\S]{0,800}?\\.\\s*abort\\s*\\(",
+        "\\.\\s*abort\\s*\\([\\s\\S]{0,800}?signal\\s*:",
+        "\\b(let|var)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*(true|false)\\b[\\s\\S]{0,600}?if\\s*\\(\\s*!?\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*(return\\b|[\\s\\S]{0,40}?set[A-Z])[\\s\\S]{0,400}?[A-Za-z_$][\\w$]*\\s*=\\s*(true|false)\\b",
+        "\\b(?:let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:true|false)\\b[\\s\\S]{0,400}?\\bif\\s*\\(\\s*!?\\s*\\1\\s*\\)[\\s\\S]{0,400}?\\b\\1\\s*=\\s*(?:true|false)\\b",
+        "(\\+\\+|\\.current\\s*=)[\\s\\S]{0,400}?if\\s*\\(\\s*[\\w.$]+\\s*(===|!==)\\s*[\\w.$]+\\s*\\)\\s*(return\\b|[\\s\\S]{0,40}?set[A-Z])"
+      ]
+    },
+    {
+      "key": "D",
+      "label": "reset page on new search",
+      "file": "client/src/components/ItemList",
+      "any": [
+        "setPage\\(\\s*1\\s*\\)[\\s\\S]{0,120}?\\}\\s*,\\s*\\[[^\\]]*\\bquery\\b[^\\]]*\\]",
+        "setQuery\\([\\s\\S]{0,120}?setPage\\(\\s*1\\s*\\)",
+        "setPage\\(\\s*1\\s*\\)[\\s\\S]{0,120}?setQuery\\(",
+        "set[A-Z]\\w*\\([\\s\\S]{0,80}?\\{[^{}]*\\bquery\\b[^{}]*\\bpage\\s*:\\s*1\\b",
+        "set[A-Z]\\w*\\([\\s\\S]{0,80}?\\{[^{}]*\\bpage\\s*:\\s*1\\b[^{}]*\\bquery\\b",
+        "return\\s*\\{[^{}]*\\bquery\\b[^{}]*\\bpage\\s*:\\s*1\\b",
+        "return\\s*\\{[^{}]*\\bpage\\s*:\\s*1\\b[^{}]*\\bquery\\b"
+      ]
+    }
+  ],
+  "precise": "Make exactly these four changes.\n\n1. `server/routes/items.ts` \u2014 in the `sort === \"name\"` branch, `result.sort(...)` is called on what is still the\n   module-level `ITEMS` array whenever no search filter was applied. `Array.prototype.sort` sorts in place, so it\n   permanently reorders the shared store for every later request. Sort a copy instead, leaving `ITEMS` untouched.\n\n2. `server/routes/items.ts` + `client/src/hooks/useItems.ts` \u2014 the server responds with the key `totalCount`, but\n   the client's `ItemsResponse` interface declares `total` and reads `data.total`, which is always `undefined`.\n   Make both sides agree on one key name; change whichever side you prefer, but the interface, the read, and the\n   response must all match.\n\n3. `client/src/hooks/useItems.ts` \u2014 the `fetch` inside `useEffect` has no cancellation, so when `page` or `query`\n   changes quickly an older, slower response can resolve after a newer one and overwrite it. Ensure only the most\n   recent request is allowed to call `setItems`/`setTotal`.\n\n4. `client/src/components/ItemList.tsx` \u2014 changing the search `query` does not reset `page`, so searching while on\n   page 4 requests page 4 of the filtered results, which is usually empty. Reset the page to 1 whenever the query\n   changes."
+}
