@@ -54,6 +54,62 @@ still hold real quality at 16GB — that's the actual gap it fills.
 | `pi` `maxTokens` | 3072 | The naive default (12000) halves the usable input budget for no benefit. |
 | `pi` compaction `reserveTokens`/`keepRecentTokens` | 3072 / 6000 | The library defaults (16384 / 20000) exceed a 24576-token window entirely, causing endless compaction — reproduced directly as a **143-round loop that edited nothing.** |
 
+## How it performs on real React/Node/TypeScript bugs
+
+The numbers above aren't from a generic benchmark. They come from a purpose-built suite of 7 realistic
+multi-file coding-repair projects — React + Express + TypeScript, one with a WebSocket server — each with
+several **interacting** bugs described the way a real user would report them (by symptom, never by naming the
+cause). Three examples, taken directly from the suite, to make this concrete rather than abstract:
+
+- **`items-search`** (React + Express + TypeScript) — the results list re-sorts correctly the first time, then
+  scrambles on every sort after that. Root cause: the sort handler mutates the shared in-memory data store
+  in place (`ITEMS.sort(...)`) instead of sorting a copy, so every other consumer of that store sees the
+  mutation too.
+- **`cart-checkout`** (React + Express + TypeScript) — a returning customer's discount code makes the total
+  *higher* than list price on some carts. Root cause: tax is calculated before the discount is applied instead
+  of after, and the two orderings only produce different rounded totals for specific subtotal/discount
+  combinations — the kind of bug that survives casual manual testing.
+- **`realtime-sync`** (React + Express + `ws` + TypeScript) — a client that just sent an edit sees its own
+  change applied twice. Root cause: the WebSocket broadcast loop sends to every connected client including the
+  one that originated the message, instead of excluding the sender.
+
+Grading is by **real execution**, not text matching, wherever the bug is pure logic (an executable oracle
+imports the fixed code and calls it with real inputs) — the same instrument used to produce every number here.
+
+**Measured on a Mac mini M1, 16GB, this exact kit's configuration:**
+
+| Mode | What it means | Score |
+|---|---|---|
+| Unaided discovery | No bug report at all — find every defect yourself | 13/24 (54%) |
+| Symptom report | A user-style bug report, no cause named | **27/30 (90%)** |
+| Precise instructions | Told exactly which file and which defect | 18/18 (100%) |
+| Discovery + defect checklist | Unaided, but handed a checklist of defect categories | 17/24 (71%) |
+
+The gap between the first two rows is the finding that matters most: this model is far better at fixing a bug
+you can describe than at finding one you can't. That's exactly why the included `AGENTS.md` pushes toward
+"here's what's wrong" requests over "find what's wrong" ones — see below.
+
+**Decode speed on the same suite, extended to other Apple Silicon chips the same way as the setup-time
+estimate** (scaled from each chip's published memory bandwidth relative to the M1's measured number — real
+math, not a real measurement on anything but M1):
+
+| Chip | Bandwidth (GB/s, spec) | tokens/sec |
+|---|---|---|
+| M1 | 68 | **18.6 — measured** |
+| M2 | 100 | ~27.4 — estimated |
+| M2 Pro | 200 | ~54.7 — estimated |
+| M3 | 100 | ~27.4 — estimated |
+| M3 Pro | 150 | ~41.0 — estimated |
+| M1 Max / M2 Max / M3 Max | 400 | ~109.4 — estimated |
+| M4 | 120 | ~32.8 — estimated |
+| M4 Pro | 273 | ~74.7 — estimated |
+| M4 Max | 546 | ~149.3 — estimated |
+
+Run `setup.sh --doctor` any time to check an existing install against this exact configuration. A way to
+measure and report your own real number on a non-M1 chip — replacing an estimate row above with a measured
+one — is planned but not built yet; if you're on a Pro/Max/Ultra chip and want to help close that gap sooner,
+open an issue.
+
 ## Why the `AGENTS.md` matters as much as the config
 
 This model was measured — independently, in [AgentFloor](https://arxiv.org/abs/2605.00334), and reproduced
@@ -75,6 +131,21 @@ this model: +17 points, 54%→71%, on unaided discovery).
   session used was wrong on over half its checks before hardening, the tensor-offload pilot that closed a
   promising-looking capacity idea, the harness comparisons — it lives in a separate research repository. This
   kit is deliberately the small, practical slice of that work.
+
+## Other commands
+
+Passing a flag through a pipe needs `bash -s --` (otherwise bash reads the flag itself, not the script):
+
+```
+curl -fsSL <raw-url>/setup.sh | bash -s -- --doctor         # diagnose an existing install, read-only
+curl -fsSL <raw-url>/setup.sh | bash -s -- --config-only     # rewrite pi's config + AGENTS.md only
+curl -fsSL <raw-url>/setup.sh | bash -s -- --start-only      # (re)start the server with the validated flags
+curl -fsSL <raw-url>/setup.sh | bash -s -- --force-download  # re-download the model even if one is present
+```
+
+`--doctor` is the one to reach for first if something's wrong — it checks hardware, prerequisites, the model
+file, the running server (including whether its actual flags still match this kit's validated set), and both
+of `pi`'s config files, and points at the specific command above that fixes whatever it finds.
 
 ## Requirements
 
