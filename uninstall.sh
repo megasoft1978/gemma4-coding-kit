@@ -234,7 +234,7 @@ if [ -f "$AGENTS_LIST" ]; then
         : # backup path recorded doesn't match this file; leave it, don't guess
       elif [ -f "${path}.pre-gemma4-kit" ]; then
         run "restore ${path}.pre-gemma4-kit -> $path" mv "${path}.pre-gemma4-kit" "$path"
-        echo "restored your original AGENTS.md from the pre-install backup"
+        [ "$DRY_RUN" = "1" ] || echo "restored your original AGENTS.md from the pre-install backup"
       fi
     else
       echo "kept: $path"

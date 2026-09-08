@@ -33,7 +33,8 @@ still hold real quality at 16GB — that's the actual gap it fills.
    M1's — clearly labeled as such, never presented as a measurement.
 2. **Checks for `llama.cpp` and `pi`.** Asks before installing either one — never silently installs software.
 3. **Downloads the model** (`unsloth/gemma-4-26B-A4B-it-GGUF`, the `UD-IQ2_M` quant, ~9.3GB), verified by
-   exact byte size, not just a successful download.
+   exact byte size, not just a successful download. An interrupted download resumes where it stopped on the
+   next run rather than starting over.
 4. **Starts `llama-server`** with every flag this measured as worth having, and a real smoke-test (not just a
    health check) before trusting the boot.
 5. **Configures `pi`** with the context window and token settings that avoid a real failure mode this session
