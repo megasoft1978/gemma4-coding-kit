@@ -1,0 +1,37 @@
+name: Chip speed report
+description: Report a measured tokens/sec number for a chip this kit currently only estimates for.
+title: "Chip report: "
+labels: ["chip-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `setup.sh --report-speed` prints a link like this one, pre-filled with your measured number. You can
+        also fill this in by hand if you measured it another way -- just say so in Notes.
+  - type: input
+    id: chip
+    attributes:
+      label: Chip
+      description: Exact chip name, e.g. "Apple M4 Pro"
+    validations:
+      required: true
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+    validations:
+      required: false
+  - type: input
+    id: measured_tps
+    attributes:
+      label: Measured tokens/sec
+      description: The second-run number setup.sh --report-speed printed (first run pays a cold mmap cost)
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything unusual -- thermal throttling, other apps running, a different quant, etc.
+    validations:
+      required: false

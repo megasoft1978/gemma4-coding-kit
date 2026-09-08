@@ -12,6 +12,7 @@
 #   curl -fsSL <raw>/setup.sh | bash -s -- --force-download # re-download the model even if a same-size file exists
 #   curl -fsSL <raw>/setup.sh | bash -s -- --check           # compare this install against the latest release
 #   curl -fsSL <raw>/setup.sh | bash -s -- --upgrade         # reapply current config + restart the server
+#   curl -fsSL <raw>/setup.sh | bash -s -- --report-speed    # measure real tokens/sec on an estimate-only chip
 #
 # One mode needs a real git checkout, not the curl-pipe install, because it has data too large to embed here:
 #
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
     --selftest) MODE=selftest ;;
     --check) MODE=check ;;
     --upgrade) MODE=upgrade ;;
+    --report-speed) MODE=report-speed ;;
     --benchmark)
       MODE=benchmark
       # optional positional scenario id/"all" right after the flag, e.g. `--benchmark cart-checkout`
@@ -87,6 +89,10 @@ MAX_TOKENS=3072
 COMPACT_RESERVE=3072
 COMPACT_KEEP=6000
 SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --cache-reuse 256)
+# Pinned into config_sig deliberately: --spec-type ngram-simple's acceptance rate is prompt-dependent, so if
+# this text ever changed without a version bump, reports collected before and after the change would silently
+# describe two different measurements while claiming to be the same number.
+REPORT_PROMPT="Write a small TypeScript function that debounces another function by N milliseconds, plus one example call. Explain briefly."
 # Fetched by --check ONLY as a staleness beacon -- never sourced or executed, and never supplies a value this
 # script acts on (every constant above is still what actually runs). A compromised or lagging beacon can tell
 # you you're behind; it cannot change what your machine does.
@@ -187,7 +193,7 @@ json_field() {
 # defines it. CI's version-sync job checks this against the repo's own VERSION file.
 config_sig() {
   {
-    printf '%s\n' "$MODEL_FILE" "$MODEL_BYTES" "${SERVER_FLAGS[@]}" "$CTX" "$MAX_TOKENS" "$COMPACT_RESERVE" "$COMPACT_KEEP"
+    printf '%s\n' "$MODEL_FILE" "$MODEL_BYTES" "${SERVER_FLAGS[@]}" "$CTX" "$MAX_TOKENS" "$COMPACT_RESERVE" "$COMPACT_KEEP" "$REPORT_PROMPT"
     printf '%s' "$AGENTS_MD_BODY"
   } | shasum -a 256 | cut -c1-16
 }
@@ -878,6 +884,67 @@ run_benchmark() {
 }
 
 # ============================================================================================================
+# --report-speed -- measures real tokens/sec on chips this kit currently only estimates for, and prints a
+# pre-filled GitHub issue link (never opened automatically -- the report is shown in full in the terminal
+# first; this kit never phones home on its own). Accepting a report is then a one-line diff: fill in
+# chip_measured_tps() and one README row, no other code path changes.
+# ============================================================================================================
+timed_completion() {  # prints tokens/sec for one REPORT_PROMPT completion, or "0" if it couldn't measure
+  local t0 t1 body tok wall
+  t0=$(date +%s)
+  body=$(curl -s -m 120 "http://127.0.0.1:$PORT/v1/chat/completions" -H 'content-type: application/json' \
+    -d "$(REPORT_PROMPT="$REPORT_PROMPT" node -e '
+      process.stdout.write(JSON.stringify({
+        messages: [{ role: "user", content: process.env.REPORT_PROMPT }],
+        max_tokens: 256, temperature: 0,
+      }));
+    ')" || true)
+  t1=$(date +%s)
+  tok=$(printf '%s' "$body" | EXPR='j.usage && j.usage.completion_tokens' json_field 2>/dev/null || true)
+  wall=$(( t1 - t0 ))
+  if [ -z "$tok" ] || [ "$tok" = "0" ] || [ "$wall" -le 0 ]; then echo "0"; return; fi
+  awk -v tok="$tok" -v wall="$wall" 'BEGIN { printf "%.1f", tok/wall }'
+}
+
+report_speed() {
+  echo "== gemma4-coding-kit chip speed report =="
+  local pid; pid=$(server_pid || true)
+  if [ -z "$pid" ] || ! server_health; then
+    echo "No validated server running on port $PORT. Start one first: setup.sh --start-only" >&2
+    exit 1
+  fi
+  detect_hw
+  if [ -n "$(chip_measured_tps "$CHIP")" ]; then
+    echo "$CHIP already has a measured number in this kit ($(chip_measured_tps "$CHIP") tokens/sec) -- no report needed."
+    exit 0
+  fi
+  echo "Chip: $CHIP (currently only an ESTIMATE in this kit)"
+  echo "Running two timed completions -- the first pays a cold mmap-page-in cost, the second is the real number."
+  local tps1 tps2
+  tps1=$(timed_completion)
+  tps2=$(timed_completion)
+  echo
+  echo "First run:  ${tps1} tokens/sec"
+  echo "Second run: ${tps2} tokens/sec  <- this is the number to report"
+  if [ "$tps2" = "0" ]; then
+    echo
+    echo "Could not get a usable measurement (empty or malformed completion). Try again, or report by hand." >&2
+    exit 1
+  fi
+  echo
+  echo "To contribute this measurement, open an issue with these fields pre-filled (nothing is sent automatically):"
+  REPORT_CHIP="$CHIP" REPORT_MAC="$(sw_vers -productVersion 2>/dev/null || true)" REPORT_TPS="$tps2" node -e '
+    const params = new URLSearchParams({
+      template: "chip-report.yml",
+      chip: process.env.REPORT_CHIP || "",
+      macos_version: process.env.REPORT_MAC || "",
+      measured_tps: process.env.REPORT_TPS || "",
+    });
+    console.log("https://github.com/megasoft1978/gemma4-coding-kit/issues/new?" + params.toString());
+  '
+}
+
+# ============================================================================================================
 # Dispatch
 # ============================================================================================================
 case "$MODE" in
@@ -913,6 +980,9 @@ case "$MODE" in
     ;;
   check)
     check
+    ;;
+  report-speed)
+    report_speed
     ;;
   upgrade)
     upgrade

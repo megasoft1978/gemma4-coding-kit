@@ -110,10 +110,11 @@ math, not a real measurement on anything but M1):
 | M4 Pro | 273 | ~74.7 — estimated |
 | M4 Max | 546 | ~149.3 — estimated |
 
-Run `setup.sh --doctor` any time to check an existing install against this exact configuration. A way to
-measure and report your own real number on a non-M1 chip — replacing an estimate row above with a measured
-one — is planned but not built yet; if you're on a Pro/Max/Ultra chip and want to help close that gap sooner,
-open an issue.
+Run `setup.sh --doctor` any time to check an existing install against this exact configuration. If you're on
+any chip above other than M1, `setup.sh --report-speed` measures your real number (two timed completions
+against your already-running server; the second, past the cold mmap-page-in cost, is the one that matters) and
+prints a pre-filled issue link — nothing is sent automatically, and it prints the number in the terminal first
+either way. Turning an accepted report into an updated row is a one-line diff on this end.
 
 ## Why the `AGENTS.md` matters as much as the config
 
@@ -148,6 +149,7 @@ curl -fsSL <raw-url>/setup.sh | bash -s -- --start-only      # (re)start the ser
 curl -fsSL <raw-url>/setup.sh | bash -s -- --force-download  # re-download the model even if one is present
 curl -fsSL <raw-url>/setup.sh | bash -s -- --check            # compare your install against the latest release
 curl -fsSL <raw-url>/setup.sh | bash -s -- --upgrade           # reapply the current config + restart the server
+curl -fsSL <raw-url>/setup.sh | bash -s -- --report-speed      # measure real tokens/sec on a non-M1 chip
 ```
 
 `--check` fetches [`VERSION`](VERSION) (a small staleness beacon, never sourced or executed, never a source of
