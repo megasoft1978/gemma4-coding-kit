@@ -78,7 +78,17 @@ async function complete(prompt, { port, maxTokens, timeoutMs }) {
     const body = await res.json();
     const content = body?.choices?.[0]?.message?.content ?? "";
     const reasoning = body?.choices?.[0]?.message?.reasoning_content ?? "";
-    return { content, reasoning };
+    // llama-server's own timings: generation rate with prompt processing excluded, and the speculative-decode
+    // acceptance rate (drafted tokens accepted / drafted) -- the number that tells you whether ngram-simple
+    // is actually earning its keep on this workload.
+    const t = body?.timings ?? {};
+    return {
+      content, reasoning,
+      completion_tokens: body?.usage?.completion_tokens ?? t.predicted_n ?? null,
+      tps: t.predicted_per_second ?? null,
+      prompt_tps: t.prompt_per_second ?? null,
+      draft_accept: (t.draft_n > 0) ? t.draft_n_accepted / t.draft_n : null,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -90,9 +100,9 @@ async function runScenario(scenario, opts) {
     return { scenario: scenario.id, verdict: "skip", detail: "symptom mode not valid for this scenario" };
   }
   const prompt = buildSymptomPrompt(scenario);
-  let content, reasoning;
+  let content, reasoning, completion_tokens, tps, prompt_tps, draft_accept;
   try {
-    ({ content, reasoning } = await complete(prompt, opts));
+    ({ content, reasoning, completion_tokens, tps, prompt_tps, draft_accept } = await complete(prompt, opts));
   } catch (e) {
     const wall_s = (Date.now() - t0) / 1000;
     const timedOut = e.name === "AbortError";
@@ -110,7 +120,7 @@ async function runScenario(scenario, opts) {
   try {
     const bugs = grade(scenario, content, ORACLE_DIR, scratchDir);
     const pass = bugs.filter((b) => b.pass).length;
-    return { scenario: scenario.id, verdict: "ok", pass, total: bugs.length, wall_s, bugs };
+    return { scenario: scenario.id, verdict: "ok", pass, total: bugs.length, wall_s, completion_tokens, tps, prompt_tps, draft_accept, bugs };
   } catch (e) {
     // grade() itself threw (not an oracle failure -- those come back as pass:false). Most likely a Node too
     // old for --experimental-strip-types, or a missing oracle tree. Reported per scenario, never re-thrown,

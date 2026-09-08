@@ -946,7 +946,7 @@ run_benchmark() {
 
   echo "== gemma4-coding-kit benchmark: $BENCH_TARGET =="
   node "$BENCH_DIR/bench.mjs" "$BENCH_TARGET" --port "$PORT" --max-tokens "$MAX_TOKENS" | node -e '
-    let fails = 0, warns = 0, totalPass = 0, totalBugs = 0, totalWall = 0, n = 0;
+    let fails = 0, warns = 0, totalPass = 0, totalBugs = 0, totalWall = 0, n = 0, totalTok = 0, genSecs = 0, accepted = [];
     const tag = (kind, msg) => {
       const label = { ok: "[ ok ] ", warn: "[warn] ", fail: "[fail] ", skip: "[skip] " }[kind];
       console.log(label + msg);
@@ -969,7 +969,13 @@ run_benchmark() {
         if (r.verdict === "error") { tag("fail", `${r.scenario}: ${r.detail}`); continue; }
         totalPass += r.pass; totalBugs += r.total; totalWall += r.wall_s;
         const pct = Math.round((r.pass / r.total) * 100);
-        const line2 = `${r.scenario}: ${r.pass}/${r.total} (${pct}%) in ${r.wall_s.toFixed(1)}s`;
+        let speed = "";
+        if (r.tps) {
+          speed = `, ${r.tps.toFixed(1)} tok/s`;
+          if (r.completion_tokens) { totalTok += r.completion_tokens; genSecs += r.completion_tokens / r.tps; }
+          if (r.draft_accept != null) { speed += `, ${Math.round(r.draft_accept * 100)}% draft accepted`; accepted.push(r.draft_accept); }
+        }
+        const line2 = `${r.scenario}: ${r.pass}/${r.total} (${pct}%) in ${r.wall_s.toFixed(1)}s${speed}`;
         if (r.pass === r.total) tag("ok", line2);
         else if (r.pass > 0) tag("warn", line2);
         else tag("fail", line2);
@@ -978,7 +984,10 @@ run_benchmark() {
     process.stdin.on("end", () => {
       if (totalBugs > 0) {
         const pct = Math.round((totalPass / totalBugs) * 100);
-        console.log(`\n== benchmark: ${totalPass}/${totalBugs} (${pct}%) across ${n} scenario(s), ${totalWall.toFixed(1)}s wall ==`);
+        let speed = "";
+        if (genSecs > 0) speed = `, ${(totalTok / genSecs).toFixed(1)} tok/s generation over ${totalTok} tokens`;
+        if (accepted.length) speed += `, ${Math.round(accepted.reduce((a, b) => a + b, 0) / accepted.length * 100)}% mean draft acceptance`;
+        console.log(`\n== benchmark: ${totalPass}/${totalBugs} (${pct}%) across ${n} scenario(s), ${totalWall.toFixed(1)}s wall${speed} ==`);
         console.log("(vs. the published baseline table in README.md -- exact match is not expected; temperature-0 determinism only guarantees a given server build reproduces itself)");
       }
       process.exit(fails > 0 ? 1 : warns > 0 ? 2 : 0);
