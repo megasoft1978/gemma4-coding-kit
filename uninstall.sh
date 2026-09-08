@@ -27,10 +27,19 @@ while [ $# -gt 0 ]; do
     --keep-model) KEEP_MODEL=1 ;;
     --all) DO_ALL=1 ;;
     --help|-h)
-      # Only the CONTIGUOUS comment block at the top of the file -- a plain `grep '^#'` also matches every
-      # "---------- N. section ------" header comment scattered through the file's body (same bug fixed in
-      # setup.sh's --help).
-      awk '/^#!/ { next } /^#/ { print; next } { exit }' "$0" | sed 's/^# \{0,1\}//'
+      # A heredoc, not a grep of this file: when piped through `curl | bash`, $0 is /bin/bash, not this script.
+      cat << 'EOF'
+gemma4-coding-kit uninstall -- reverses setup.sh using the manifest it wrote at ~/.gemma4-coding-kit/install.env
+
+  curl -fsSL https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/uninstall.sh | bash
+
+Flags (pass them through a pipe with `bash -s --`):
+  --dry-run      print the plan and exit, touch nothing
+  --yes          skip confirmation prompts (the model file is still kept -- see --purge-model)
+  --purge-model  also delete the downloaded model file (the only irreversible, expensive-to-redo step)
+  --keep-model   explicitly keep it without being asked (useful with --yes)
+  --all          also offer to reverse llama.cpp/pi installs, but ONLY the ones this kit's own install did
+EOF
       exit 0
       ;;
     *) echo "Unknown argument: $1 (see --help)" >&2; exit 64 ;;

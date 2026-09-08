@@ -51,7 +51,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: real runner hardware is refused for the right reason (7GB RAM), not a crash
         run: |
-          out=$(./setup.sh --selftest 2>&1); code=$?
+          # `x=$(cmd); code=$?` under bash -e exits before code=$? ever runs when cmd fails; this form doesn't.
+          out=$(./setup.sh --selftest 2>&1) && code=0 || code=$?
           echo "$out"
           [ "$code" = 1 ] || { echo "expected exit 1 (refused), got $code"; exit 1; }
           echo "$out" | grep -q "needs 16GB" || { echo "expected the memory refusal message"; exit 1; }
@@ -87,7 +88,7 @@ jobs:
           # no controlling tty either, so ask() must hit its third branch and decline instead of blocking
           # forever. perl's alarm is the watchdog because GNU `timeout` isn't in macOS's base system.
           out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_MEMBYTES=17179869184 \
-                perl -e 'alarm shift; exec @ARGV' 60 ./setup.sh < /dev/null 2>&1); code=$?
+                perl -e 'alarm shift; exec @ARGV' 60 ./setup.sh < /dev/null 2>&1) && code=0 || code=$?
           echo "$out"
           echo "$out" | grep -q "no terminal available" || { echo "expected the no-terminal message"; exit 1; }
           [ "$code" = 1 ] || { echo "expected exit 1 (declined), got $code"; exit 1; }

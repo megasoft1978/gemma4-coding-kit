@@ -30,6 +30,33 @@
 # What this does, in order, and why each number is what it is: see README.md in this repo.
 set -euo pipefail
 
+# --help is a heredoc rather than a grep of this file's own header: when piped through `curl | bash`, $0 is
+# /bin/bash itself, so there is no source file to read.
+usage() {
+  cat << 'EOF'
+gemma4-coding-kit -- Gemma-4-26B-A4B as a local coding assistant on a 16GB Apple Silicon Mac.
+
+  curl -fsSL https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/setup.sh | bash
+
+Other modes (pass flags through a pipe with `bash -s --`, otherwise bash reads them as its own):
+
+  --doctor          diagnose an existing install, read-only
+  --config-only     rewrite pi's config + AGENTS.md, no download/boot
+  --start-only      (re)start the server with the validated flags
+  --force-download  re-download the model even if a same-size file exists
+  --check           compare this install against the latest release
+  --upgrade         reapply the current config + restart the server
+  --report-speed    measure real tokens/sec on a chip this kit only estimates for
+  --benchmark [id]  grade a running server against the 7-scenario suite (needs a git checkout)
+
+Modifiers:
+  --yes             answer yes to EVERY prompt, including installing llama.cpp / pi via brew / npm
+  --no-exec         set everything up but don't start the interactive pi session at the end
+
+Details and the numbers behind every setting: README.md in the repo.
+EOF
+}
+
 # ============================================================================================================
 # Argument dispatch — parsed first, before anything touches hardware or disk, so hardware-untouched modes
 # (--print-sig, --help) can run with zero side effects, including on Linux CI runners.
@@ -58,13 +85,7 @@ while [ $# -gt 0 ]; do
     --no-exec) NO_EXEC=1 ;;
     --yes) ASSUME_YES=1 ;;
     --force-download) FORCE_DOWNLOAD=1 ;;
-    --help|-h)
-      # Only the CONTIGUOUS comment block at the top of the file -- a plain `grep '^#'` matches every
-      # comment-only line in the whole 900-line file, including internal maintainer notes deep in the
-      # constants/functions sections, which dumped 100+ lines of implementation trivia into --help's output.
-      awk '/^#!/ { next } /^#/ { print; next } { exit }' "$0" | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
+    --help|-h) usage; exit 0 ;;
     *)
       echo "Unknown argument: $1 (see --help)" >&2
       exit 64
@@ -1050,9 +1071,14 @@ case "$MODE" in
     # to end with a stray quote (or quote-paren) line.
     # The quote character is passed in via -v rather than written as \x27, which not every awk (mawk on
     # Ubuntu, where CI's js-syntax job runs) understands inside a regex.
+    # A closing line may carry shell after the quote -- `') || return 3` -- which is bash, not JS.
+    case "$0" in
+      *setup.sh) ;;
+      *) echo "--print-node-snippets needs to read its own source; run it from a checkout, not a pipe." >&2; exit 64 ;;
+    esac
     awk -v q="'" '
       /node -e .$/ { n++; print "--- snippet " n " ---"; capture=1; next }
-      capture && $0 ~ ("^[ \t]*" q "\\)?$") { capture=0; next }
+      capture && $0 ~ ("^[ \t]*" q "\\)?( .*)?$") { capture=0; next }
       capture { print }
     ' "$0"
     exit 0
