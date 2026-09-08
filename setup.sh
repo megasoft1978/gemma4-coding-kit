@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gemma-4 coding kit — one command, no clone.
 #
-#   curl -fsSL https://raw.githubusercontent.com/<user>/gemma4-coding-kit/main/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/setup.sh | bash
 #
 # Self-contained on purpose: when piped through `curl | bash`, there is no local checkout to reference sibling
 # files from, so every step lives in this one file. Prompts read from /dev/tty rather than stdin, because a
