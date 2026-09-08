@@ -48,7 +48,7 @@ still hold real quality at 16GB — that's the actual gap it fills.
 | Setting | Value | Why |
 |---|---|---|
 | Model | `UD-IQ2_M` quant | Measured at 90% quality on a symptom-report coding suite at this size — not the smallest quant available, the one actually tested. |
-| `--spec-type ngram-simple` | on | 1.36× decode speed, lossless (identical output, identical token counts). |
+| `--spec-type ngram-simple` | on | 1.42× decode speed on the repair suite (24.9 vs 17.5 tok/s). Not perfectly lossless: one bug in 36 flipped (see "Levers measured" below). |
 | `--cache-reuse 256` | on | 41× faster time-to-first-token on repeated context (7.08s → 0.17s, measured). |
 | `--reasoning off` | on, not optional | With thinking enabled, this model produced 46,615 characters of internal reasoning and a **completely empty final answer**, even at 24k context and a 16k output ceiling. It doesn't converge on coding tasks. |
 | Context window | 24576 | Validated boot + smoke-test size on this model. |
@@ -116,6 +116,41 @@ any chip above other than M1, `setup.sh --report-speed` measures your real numbe
 against your already-running server; the second, past the cold mmap-page-in cost, is the one that matters) and
 prints a pre-filled issue link — nothing is sent automatically, and it prints the number in the terminal first
 either way. Turning an accepted report into an updated row is a one-line diff on this end.
+
+## Levers measured, and why the defaults are what they are
+
+Every server flag above was re-tested with `setup.sh --benchmark all` (7 scenarios, 36 bugs, temperature 0)
+against the same server binary, one change at a time. Generation speed is llama-server's own `predicted_per_second`
+(prompt processing excluded); memory is macOS `footprint` (dirty pages — the number that actually competes with
+your other apps; the 9.3GB of model weights are clean file-backed pages on top of it).
+
+| Config | Bugs fixed | Generation tok/s | Draft acceptance | Verdict |
+|---|---|---|---|---|
+| no speculative decoding | 34/36 | 17.5 | — | reference |
+| **`ngram-simple` (default)** | **33/36** | **24.9** | 47% | **fastest; kept** |
+| `ngram-simple`, draft length 64 | 33/36 | 23.8 | 42% | no gain |
+| `ngram-mod` | 34/36 | 23.0 | 49% | 8% slower than default |
+| `ngram-map-k4v` | 34/36 | 19.3 | 45% | slow |
+| default + KV cache q8_0 | 34/36 | 19.7 | 48% | −20% speed, −39% peak memory |
+
+Three things worth knowing from this table:
+
+- **Speculative decoding is where the speed comes from, and it's workload-dependent.** Draft acceptance runs
+  50–64% when the model is *repairing* files it was shown (it copies most of them back) and 16–27% when it's
+  writing *new* code (`notify-channel`, `realtime-sync`). Expect ~25 tok/s on fixes and ~18 on fresh code; the
+  18.6 headline number above is the conservative one.
+- **It is not perfectly lossless.** At temperature 0 the same prompt gave `realtime-sync` 5/6 without speculation
+  and 4/6 with it — different batch shapes change floating-point rounding, and one near-tie flipped. One bug in
+  36 is inside the suite's noise floor, but it's real and deterministic, so the "identical output" claim you may
+  have seen elsewhere is not true in general. The default still wins on quality×speed (22.8 vs 21.7 for
+  `ngram-mod`, 16.5 with no speculation).
+- **Memory: the KV cache is the part that grows.** Dirty footprint is ~0.9GB idle, ~1.4GB after one long
+  scenario, and reaches ~4.8GB across a long session as more of the 24k-token cache gets touched. With the
+  9.3GB of weights that is ~14GB on a 16GB machine — enough that heavy apps alongside it will cause paging.
+  `-ctk q8_0 -ctv q8_0` cuts the KV cache in half (peak 0.86GB vs 1.41GB on the same scenario) at a 20% speed
+  cost, with no measurable quality change. The kit ships the fast setting; if you're routinely memory-squeezed,
+  add those two flags to `SERVER_FLAGS` in `setup.sh` — that's the one edit, and `--doctor` will then report
+  the flag difference as expected. `-ub 256` was also tried: −7% memory for −3% speed, not worth a default.
 
 ## Why the `AGENTS.md` matters as much as the config
 
