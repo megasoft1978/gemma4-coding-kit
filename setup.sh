@@ -10,6 +10,8 @@
 #   curl -fsSL <raw>/setup.sh | bash -s -- --config-only    # rewrite pi's config + AGENTS.md, no download/boot
 #   curl -fsSL <raw>/setup.sh | bash -s -- --start-only     # (re)start the server with the validated flags
 #   curl -fsSL <raw>/setup.sh | bash -s -- --force-download # re-download the model even if a same-size file exists
+#   curl -fsSL <raw>/setup.sh | bash -s -- --check           # compare this install against the latest release
+#   curl -fsSL <raw>/setup.sh | bash -s -- --upgrade         # reapply current config + restart the server
 #
 # One mode needs a real git checkout, not the curl-pipe install, because it has data too large to embed here:
 #
@@ -40,6 +42,8 @@ while [ $# -gt 0 ]; do
     --print-sig) MODE=print-sig ;;
     --print-node-snippets) MODE=print-node-snippets ;;
     --selftest) MODE=selftest ;;
+    --check) MODE=check ;;
+    --upgrade) MODE=upgrade ;;
     --benchmark)
       MODE=benchmark
       # optional positional scenario id/"all" right after the flag, e.g. `--benchmark cart-checkout`
@@ -49,7 +53,10 @@ while [ $# -gt 0 ]; do
     --yes) ASSUME_YES=1 ;;
     --force-download) FORCE_DOWNLOAD=1 ;;
     --help|-h)
-      grep '^#[^!]' "$0" | sed 's/^# \{0,1\}//'
+      # Only the CONTIGUOUS comment block at the top of the file -- a plain `grep '^#'` matches every
+      # comment-only line in the whole 900-line file, including internal maintainer notes deep in the
+      # constants/functions sections, which dumped 100+ lines of implementation trivia into --help's output.
+      awk '/^#!/ { next } /^#/ { print; next } { exit }' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -80,6 +87,10 @@ MAX_TOKENS=3072
 COMPACT_RESERVE=3072
 COMPACT_KEEP=6000
 SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --cache-reuse 256)
+# Fetched by --check ONLY as a staleness beacon -- never sourced or executed, and never supplies a value this
+# script acts on (every constant above is still what actually runs). A compromised or lagging beacon can tell
+# you you're behind; it cannot change what your machine does.
+VERSION_URL="https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/VERSION"
 # Substrings doctor checks for in the running server's own command line -- kept separate from SERVER_FLAGS
 # because some flags take a value (`-c 24576`) and checking that as one substring is more reliable than
 # checking `-c` and `24576` independently, which could each appear for unrelated reasons.
@@ -267,14 +278,20 @@ server_pid() {
   return 1
 }
 
-model_status() {  # sets ACTUAL_BYTES; prints "ok" / "wrong-size" / "missing" on stdout
+# Sets ACTUAL_BYTES and MODEL_STATUS ("ok"/"wrong-size"/"missing") directly -- must be called plainly
+# (`model_status`), never via `x=$(model_status)`. A command substitution forks a subshell, and a variable a
+# subshelled function sets never propagates back to the caller -- confirmed the hard way: every caller that
+# did `status=$(model_status)` and then read $ACTUAL_BYTES afterward crashed under `set -u` the first time a
+# model file actually existed on disk (the "missing" case never triggers the crash, which is why this survived
+# earlier testing -- nothing had exercised it with a real downloaded/present file).
+model_status() {
   if [ ! -f "$DEST" ]; then
     ACTUAL_BYTES=0
-    echo "missing"
+    MODEL_STATUS=missing
     return
   fi
   ACTUAL_BYTES=$(stat -f%z "$DEST" 2>/dev/null || stat -c%s "$DEST" 2>/dev/null)
-  if [ "$ACTUAL_BYTES" = "$MODEL_BYTES" ]; then echo ok; else echo wrong-size; fi
+  if [ "$ACTUAL_BYTES" = "$MODEL_BYTES" ]; then MODEL_STATUS=ok; else MODEL_STATUS=wrong-size; fi
 }
 
 server_health() {
@@ -356,7 +373,7 @@ step_download() {
     exit 1
   fi
 
-  local status; status=$(model_status)
+  model_status; local status="$MODEL_STATUS"
   if [ "$FORCE_DOWNLOAD" = "1" ] && [ -f "$DEST" ]; then
     echo "Forcing re-download."
     rm -f "$DEST"
@@ -599,7 +616,7 @@ doctor() {
 
   echo
   echo "== Model =="
-  local status; status=$(model_status)
+  model_status; local status="$MODEL_STATUS"
   case "$status" in
     ok) tag ok "$MODEL_FILE  $ACTUAL_BYTES bytes (expected $MODEL_BYTES)" ;;
     wrong-size) tag fail "$MODEL_FILE is $ACTUAL_BYTES bytes, expected $MODEL_BYTES -- re-download: setup.sh --force-download" ;;
@@ -723,6 +740,82 @@ selftest() {
 }
 
 # ============================================================================================================
+# --check -- fetches VERSION as a staleness beacon ONLY (see VERSION_URL's comment: never sourced/executed,
+# never supplies a value this script acts on). Reports three independent signals with a single exit code:
+# 0 everything current, 2 something is stale (never 1 -- an update check must never look like a hard failure).
+# Unreachable network is treated as success, not failure: a version check must never fail loud on a plane.
+# ============================================================================================================
+check() {
+  echo "== gemma4-coding-kit version check =="
+  echo "local script: $KIT_VERSION (config $(config_sig))"
+  local remote; remote=$(curl -fs -m 5 "$VERSION_URL" 2>/dev/null || true)
+  local r_ver r_sig r_model r_bytes stale=0
+  r_ver=$(printf '%s\n' "$remote" | grep '^KIT_VERSION=' | cut -d= -f2- || true)
+  if [ -z "$remote" ] || [ -z "$r_ver" ]; then
+    echo "Could not reach or parse $VERSION_URL -- treating as up to date, not a failure."
+    exit 0
+  fi
+  r_sig=$(printf '%s\n' "$remote" | grep '^CONFIG_SIG=' | cut -d= -f2- || true)
+  r_model=$(printf '%s\n' "$remote" | grep '^MODEL_FILE=' | cut -d= -f2- || true)
+  r_bytes=$(printf '%s\n' "$remote" | grep '^MODEL_BYTES=' | cut -d= -f2- || true)
+
+  if [ -n "$r_sig" ] && [ "$r_sig" != "$(config_sig)" ]; then
+    echo "[stale] this setup.sh's config differs from the latest published one ($r_ver) -- re-download it."
+    stale=1
+  else
+    echo "[ ok ] setup.sh matches the latest published config."
+  fi
+  if [ -n "$r_model" ] && { [ "$r_model" != "$MODEL_FILE" ] || [ "$r_bytes" != "$MODEL_BYTES" ]; }; then
+    echo "[stale] a different model is now recommended: $r_model ($r_bytes bytes)."
+    stale=1
+  else
+    echo "[ ok ] recommended model unchanged."
+  fi
+  if [ -f "$INSTALL_ENV" ]; then
+    local installed_sig; installed_sig=$(grep '^CONFIG_SIG=' "$INSTALL_ENV" | cut -d= -f2-)
+    if [ "$installed_sig" != "$(config_sig)" ]; then
+      echo "[stale] your installed config doesn't match this script's current config -- run: setup.sh --upgrade"
+      stale=1
+    else
+      echo "[ ok ] your installed config matches this script."
+    fi
+  fi
+  [ "$stale" = 1 ] && exit 2 || exit 0
+}
+
+# ============================================================================================================
+# --upgrade -- a flagged variant of install: restarts the server (a flag change wouldn't otherwise take
+# effect), rewrites AGENTS.md (step_agents_md already backs up a hand-edited one), and offers to prune an old
+# model file left behind if MODEL_FILE changed since the last install. Requires a prior install (install.env)
+# -- upgrading nothing isn't a meaningful operation.
+# ============================================================================================================
+upgrade() {
+  if [ ! -f "$INSTALL_ENV" ]; then
+    echo "No existing install found ($INSTALL_ENV missing). Run setup.sh normally first." >&2
+    exit 1
+  fi
+  local old_model; old_model=$(grep '^MODEL_PATH=' "$INSTALL_ENV" | cut -d= -f2-)
+  step_hw_gate
+  step_prereqs
+  step_download
+  step_server restart
+  local prior; prior=$(step_config)
+  step_agents_md
+  write_manifest "$prior"
+  if [ -n "$old_model" ] && [ "$old_model" != "$DEST" ] && [ -f "$old_model" ]; then
+    echo
+    if ask "Old model no longer used: $old_model -- delete it? [y/N]"; then
+      rm -f "$old_model"
+      echo "Deleted $old_model"
+    else
+      echo "Left in place: $old_model"
+    fi
+  fi
+  echo
+  echo "== Upgrade complete. =="
+}
+
+# ============================================================================================================
 # --benchmark -- grades an already-running, already-validated server against the 7-scenario suite in
 # benchmarks/. Never boots a server itself (same division of responsibility as --doctor: measures what's
 # there, doesn't set it up). Needs a real git checkout, not the curl-pipe install, because the scenario data
@@ -796,9 +889,13 @@ case "$MODE" in
     # Extracts each `node -e '...'` program in this file between the opening quote and its matching closing
     # quote-plus-paren, so CI can run `node --check` on each without a shell interpreter seeing inside the
     # string. Relies on this file's own convention: every snippet is `node -e '` ... `'` on its own lines.
+    # The closing-quote line is indented to match its snippet (e.g. "  '", or "  '"'"')" when the whole node -e
+    # call is wrapped in a command substitution), not always exactly one column -- an exact-one-char version
+    # silently never matched any closing line in this file, confirmed directly, so every extracted snippet used
+    # to end with a stray quote (or quote-paren) line.
     awk '
       /node -e .$/ { n++; print "--- snippet " n " ---"; capture=1; next }
-      capture && /^.\x27$/ { capture=0; next }
+      capture && /^[ \t]*\x27\)?$/ { capture=0; next }
       capture { print }
     ' "$0"
     exit 0
@@ -813,6 +910,12 @@ case "$MODE" in
   benchmark)
     run_benchmark
     exit $?
+    ;;
+  check)
+    check
+    ;;
+  upgrade)
+    upgrade
     ;;
   config-only)
     prior=$(step_config)

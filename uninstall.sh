@@ -26,7 +26,13 @@ while [ $# -gt 0 ]; do
     --purge-model) PURGE_MODEL=1 ;;
     --keep-model) KEEP_MODEL=1 ;;
     --all) DO_ALL=1 ;;
-    --help|-h) grep '^#[^!]' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h)
+      # Only the CONTIGUOUS comment block at the top of the file -- a plain `grep '^#'` also matches every
+      # "---------- N. section ------" header comment scattered through the file's body (same bug fixed in
+      # setup.sh's --help).
+      awk '/^#!/ { next } /^#/ { print; next } { exit }' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
     *) echo "Unknown argument: $1 (see --help)" >&2; exit 64 ;;
   esac
   shift
@@ -262,7 +268,15 @@ else
   echo "Re-download: the same amount again from Hugging Face if you reinstall"
   if [ "$KEEP_MODEL" = "1" ]; then
     echo "kept (--keep-model)"
-  elif [ "$PURGE_MODEL" = "1" ] || ask "Delete it? [y/N]"; then
+  elif [ "$PURGE_MODEL" = "1" ]; then
+    run "delete $MODEL_PATH" rm -f "$MODEL_PATH"
+    echo "deleted"
+  elif [ "$ASSUME_YES" = "1" ]; then
+    # ask() returns yes unconditionally under --yes, which would make plain --yes delete the model file --
+    # exactly the outcome the header comment promises will NOT happen. This is the one step --yes must never
+    # answer on its own; only an explicit --purge-model may delete it, confirmed as a real bug by testing.
+    echo "kept (--yes alone never deletes this -- pass --purge-model too if you want it gone)"
+  elif ask "Delete it? [y/N]"; then
     run "delete $MODEL_PATH" rm -f "$MODEL_PATH"
     echo "deleted"
   else

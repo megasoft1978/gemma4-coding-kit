@@ -146,6 +146,24 @@ curl -fsSL <raw-url>/setup.sh | bash -s -- --doctor         # diagnose an existi
 curl -fsSL <raw-url>/setup.sh | bash -s -- --config-only     # rewrite pi's config + AGENTS.md only
 curl -fsSL <raw-url>/setup.sh | bash -s -- --start-only      # (re)start the server with the validated flags
 curl -fsSL <raw-url>/setup.sh | bash -s -- --force-download  # re-download the model even if one is present
+curl -fsSL <raw-url>/setup.sh | bash -s -- --check            # compare your install against the latest release
+curl -fsSL <raw-url>/setup.sh | bash -s -- --upgrade           # reapply the current config + restart the server
+```
+
+`--check` fetches [`VERSION`](VERSION) (a small staleness beacon, never sourced or executed, never a source of
+values this script acts on) and reports three independent signals: whether this copy of `setup.sh` itself is
+behind the latest release, whether a different model is now recommended, and whether your installed config
+matches what this script would write today. No network access is treated as "up to date," never as a failure.
+`--upgrade` re-applies the current script's config (restarting the server, since a flag change needs one) and
+offers to delete an old model file if the recommended one changed since your last install.
+
+To remove everything this kit installed, see [`uninstall.sh`](uninstall.sh) — same curl-pipe pattern, with
+`--dry-run`, `--purge-model`, and `--all` (also reverses `llama.cpp`/`pi` installs, but only if this kit
+installed them):
+
+```
+curl -fsSL <raw-url>/uninstall.sh | bash -s -- --dry-run
+curl -fsSL <raw-url>/uninstall.sh | bash
 ```
 
 `--doctor` is the one to reach for first if something's wrong — it checks hardware, prerequisites, the model

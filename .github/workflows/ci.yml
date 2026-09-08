@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck ships preinstalled on ubuntu-latest -- no extra action needed.
+      # --severity=warning: the two SC2016 notes in setup.sh are deliberate (literal strings that must not
+      # expand), not bugs -- see the inline comments at those exact lines.
+      - run: shellcheck --severity=warning setup.sh uninstall.sh
+
+  js-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Every `node -e '...'` program embedded in setup.sh, checked for syntax errors before a user's install
+      # can fail on one -- no shell linter can see inside a single-quoted string.
+      - run: |
+          ./setup.sh --print-node-snippets > /tmp/snippets.txt
+          node -e '
+            const fs = require("fs");
+            const text = fs.readFileSync("/tmp/snippets.txt", "utf8");
+            const parts = text.split(/^--- snippet \d+ ---$/m).filter((s) => s.trim());
+            fs.mkdirSync("/tmp/snips", { recursive: true });
+            parts.forEach((p, i) => fs.writeFileSync(`/tmp/snips/snip_${i}.js`, p));
+            console.log(parts.length + " snippet(s) extracted");
+          '
+          fail=0
+          for f in /tmp/snips/*.js; do
+            node --check "$f" || { echo "SYNTAX ERROR in $f"; fail=1; }
+          done
+          node --check benchmarks/grade.mjs
+          node --check benchmarks/bench.mjs
+          exit $fail
+
+  selftest:
+    # macos-latest runners are genuinely Apple Silicon, so the happy path is tested for free. The refusal and
+    # estimate branches a runner can't otherwise produce are exercised via the double-gated env overrides
+    # (GEMMA4_KIT_SELFTEST required before FAKE_* has any effect) -- selftest mode structurally cannot
+    # download, boot a server, write config, or exec pi, so this is safe to run unattended in CI.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: real hardware, should pass (this runner IS Apple Silicon)
+        run: ./setup.sh --selftest
+      - name: non-Apple-Silicon refusal
+        run: |
+          if GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_ARCH=x86_64 GEMMA4_KIT_FAKE_CHIP="" ./setup.sh --selftest; then
+            echo "expected refusal on non-arm64, got success"; exit 1
+          fi
+      - name: under-16GB refusal
+        run: |
+          if GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_MEMBYTES=8589934592 ./setup.sh --selftest; then
+            echo "expected refusal under 16GB, got success"; exit 1
+          fi
+      - name: M1 shows MEASURED
+        run: |
+          out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_CHIP="Apple M1" GEMMA4_KIT_FAKE_MEMBYTES=17179869184 ./setup.sh --selftest)
+          echo "$out" | grep -q "MEASURED" || { echo "expected MEASURED for M1, got: $out"; exit 1; }
+      - name: M4 Max shows a correctly-scaled ESTIMATE
+        run: |
+          out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_CHIP="Apple M4 Max" GEMMA4_KIT_FAKE_MEMBYTES=68719476736 ./setup.sh --selftest)
+          echo "$out" | grep -q "149.3" || { echo "expected 149.3 t/s estimate for M4 Max, got: $out"; exit 1; }
+      - name: unknown chip falls back to M1 bandwidth but still says ESTIMATE
+        run: |
+          out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_CHIP="Apple M99 Ultra Pro" GEMMA4_KIT_FAKE_MEMBYTES=17179869184 ./setup.sh --selftest)
+          echo "$out" | grep -q "ESTIMATED" || { echo "expected ESTIMATED for unknown chip, got: $out"; exit 1; }
+          echo "$out" | grep -q "18.6" || { echo "expected M1-bandwidth-derived 18.6 t/s for unknown chip, got: $out"; exit 1; }
+      - name: no-tty declines rather than hangs
+        run: |
+          # A fresh macos-latest runner has neither llama-server nor pi, so plain install mode reaches
+          # step_prereqs's ask() prompt. </dev/null closes stdin and CI has no controlling tty either, so
+          # ask() must hit its third branch (no terminal at all) and decline instead of blocking forever --
+          # confirmed to exit 1 with "no terminal available" rather than hang, not just "eventually return".
+          out=$(timeout 30 ./setup.sh < /dev/null 2>&1); code=$?
+          echo "$out"
+          echo "$out" | grep -q "no terminal available" || { echo "expected the no-terminal message"; exit 1; }
+          [ "$code" = 1 ] || { echo "expected exit 1 (declined), got $code"; exit 1; }
+
+  version-sync:
+    # Proves VERSION can never silently disagree with the script that defines what it describes -- a
+    # maintainer changing a flag without updating VERSION gets a red build here, not a silently-wrong --check
+    # for every user later.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          script_sig=$(./setup.sh --print-sig)
+          version_sig=$(grep '^CONFIG_SIG=' VERSION | cut -d= -f2-)
+          if [ "$script_sig" != "$version_sig" ]; then
+            echo "VERSION's CONFIG_SIG ($version_sig) does not match setup.sh --print-sig ($script_sig)"
+            echo "Update VERSION's CONFIG_SIG after any change to setup.sh's config constants."
+            exit 1
+          fi
+          script_ver=$(grep '^KIT_VERSION=' setup.sh | head -1 | sed -E 's/KIT_VERSION="([^"]*)"/\1/')
+          version_ver=$(grep '^KIT_VERSION=' VERSION | cut -d= -f2-)
+          if [ "$script_ver" != "$version_ver" ]; then
+            echo "VERSION's KIT_VERSION ($version_ver) does not match setup.sh's KIT_VERSION ($script_ver)"
+            exit 1
+          fi
+          script_model=$(grep '^MODEL_FILE=' setup.sh | head -1 | sed -E 's/MODEL_FILE="([^"]*)"/\1/')
+          version_model=$(grep '^MODEL_FILE=' VERSION | cut -d= -f2-)
+          if [ "$script_model" != "$version_model" ]; then
+            echo "VERSION's MODEL_FILE ($version_model) does not match setup.sh's MODEL_FILE ($script_model)"
+            exit 1
+          fi
+          echo "VERSION matches setup.sh."
