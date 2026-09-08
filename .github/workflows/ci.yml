@@ -42,15 +42,21 @@ jobs:
           exit $fail
 
   selftest:
-    # macos-latest runners are genuinely Apple Silicon, so the happy path is tested for free. The refusal and
-    # estimate branches a runner can't otherwise produce are exercised via the double-gated env overrides
-    # (GEMMA4_KIT_SELFTEST required before FAKE_* has any effect) -- selftest mode structurally cannot
-    # download, boot a server, write config, or exec pi, so this is safe to run unattended in CI.
+    # macos-latest runners are Apple Silicon but ship with only 7GB of RAM, so the real hardware gate correctly
+    # REFUSES them -- that refusal is asserted as such below, and the happy path is reached by faking only the
+    # memory size (GEMMA4_KIT_SELFTEST must be set before any FAKE_* value has an effect). selftest mode
+    # structurally cannot download, boot a server, write config, or exec pi, so this is safe unattended.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: real hardware, should pass (this runner IS Apple Silicon)
-        run: ./setup.sh --selftest
+      - name: real runner hardware is refused for the right reason (7GB RAM), not a crash
+        run: |
+          out=$(./setup.sh --selftest 2>&1); code=$?
+          echo "$out"
+          [ "$code" = 1 ] || { echo "expected exit 1 (refused), got $code"; exit 1; }
+          echo "$out" | grep -q "needs 16GB" || { echo "expected the memory refusal message"; exit 1; }
+      - name: real chip + faked 16GB passes the gate
+        run: GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_MEMBYTES=17179869184 ./setup.sh --selftest
       - name: non-Apple-Silicon refusal
         run: |
           if GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_ARCH=x86_64 GEMMA4_KIT_FAKE_CHIP="" ./setup.sh --selftest; then
@@ -76,14 +82,18 @@ jobs:
           echo "$out" | grep -q "18.6" || { echo "expected M1-bandwidth-derived 18.6 t/s for unknown chip, got: $out"; exit 1; }
       - name: no-tty declines rather than hangs
         run: |
-          # A fresh macos-latest runner has neither llama-server nor pi, so plain install mode reaches
-          # step_prereqs's ask() prompt. </dev/null closes stdin and CI has no controlling tty either, so
-          # ask() must hit its third branch (no terminal at all) and decline instead of blocking forever --
-          # confirmed to exit 1 with "no terminal available" rather than hang, not just "eventually return".
-          out=$(timeout 30 ./setup.sh < /dev/null 2>&1); code=$?
+          # A fresh macos-latest runner has neither llama-server nor pi, so install mode (with the 7GB runner's
+          # memory faked past the gate) reaches step_prereqs's ask() prompt. </dev/null closes stdin and CI has
+          # no controlling tty either, so ask() must hit its third branch and decline instead of blocking
+          # forever. perl's alarm is the watchdog because GNU `timeout` isn't in macOS's base system.
+          out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_MEMBYTES=17179869184 \
+                perl -e 'alarm shift; exec @ARGV' 60 ./setup.sh < /dev/null 2>&1); code=$?
           echo "$out"
           echo "$out" | grep -q "no terminal available" || { echo "expected the no-terminal message"; exit 1; }
           [ "$code" = 1 ] || { echo "expected exit 1 (declined), got $code"; exit 1; }
+          command -v llama-server && { echo "selftest must never install anything"; exit 1; }
+          command -v pi && { echo "selftest must never install anything"; exit 1; }
+          exit 0
 
   version-sync:
     # Proves VERSION can never silently disagree with the script that defines what it describes -- a

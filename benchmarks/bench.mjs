@@ -33,12 +33,14 @@ function parseArgs(argv) {
 }
 
 function loadScenarios(target) {
-  const ids = target === "all"
-    ? readdirSync(SCEN_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort()
-    : [target];
+  const available = readdirSync(SCEN_DIR).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort();
+  const ids = target === "all" ? available : [target];
   return ids.map((id) => {
-    const file = path.join(SCEN_DIR, `${id}.json`);
-    return JSON.parse(readFileSync(file, "utf8"));
+    if (!available.includes(id)) {
+      console.error(`unknown scenario "${id}" -- available: ${available.join(", ")}, or "all"`);
+      process.exit(64);
+    }
+    return JSON.parse(readFileSync(path.join(SCEN_DIR, `${id}.json`), "utf8"));
   });
 }
 
@@ -106,19 +108,14 @@ async function runScenario(scenario, opts) {
 
   const scratchDir = mkdtempSync(path.join(tmpdir(), "gemma4-kit-bench-"));
   try {
-    let bugs;
-    try {
-      bugs = grade(scenario, content, ORACLE_DIR, scratchDir);
-    } catch (e) {
-      // A scenario with oracle bugs but no oracle test tree (e.g. items-search, api-versioning are pattern-only
-      // and never hit this path) would throw here -- surfaced distinctly from a Node-too-old failure below.
-      if (/--experimental-strip-types|ENOENT.*node/.test(e.message || "")) {
-        return { scenario: scenario.id, verdict: "error", detail: `oracle needs a newer Node (--experimental-strip-types): ${e.message}`, wall_s };
-      }
-      throw e;
-    }
+    const bugs = grade(scenario, content, ORACLE_DIR, scratchDir);
     const pass = bugs.filter((b) => b.pass).length;
     return { scenario: scenario.id, verdict: "ok", pass, total: bugs.length, wall_s, bugs };
+  } catch (e) {
+    // grade() itself threw (not an oracle failure -- those come back as pass:false). Most likely a Node too
+    // old for --experimental-strip-types, or a missing oracle tree. Reported per scenario, never re-thrown,
+    // so one broken scenario can't abort the rest of the batch.
+    return { scenario: scenario.id, verdict: "error", detail: `grading failed: ${e.message}`, wall_s };
   } finally {
     rmSync(scratchDir, { recursive: true, force: true });
   }
@@ -128,7 +125,12 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const scenarios = loadScenarios(opts.target);
   for (const scenario of scenarios) {
-    const result = await runScenario(scenario, opts);
+    let result;
+    try {
+      result = await runScenario(scenario, opts);
+    } catch (e) {
+      result = { scenario: scenario.id, verdict: "error", detail: e.message };
+    }
     console.log(JSON.stringify(result));
   }
 }

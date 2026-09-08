@@ -152,6 +152,10 @@ curl -fsSL <raw-url>/setup.sh | bash -s -- --upgrade           # reapply the cur
 curl -fsSL <raw-url>/setup.sh | bash -s -- --report-speed      # measure real tokens/sec on a non-M1 chip
 ```
 
+Two modifiers: `--no-exec` does the whole setup but doesn't start the interactive `pi` session at the end, and
+`--yes` answers yes to every prompt — **including "install `llama.cpp` / `pi` now?"** — so it's explicit consent
+for a fully unattended install, not a shortcut to use casually.
+
 `--check` fetches [`VERSION`](VERSION) (a small staleness beacon, never sourced or executed, never a source of
 values this script acts on) and reports three independent signals: whether this copy of `setup.sh` itself is
 behind the latest release, whether a different model is now recommended, and whether your installed config

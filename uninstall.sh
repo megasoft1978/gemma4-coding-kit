@@ -39,6 +39,7 @@ while [ $# -gt 0 ]; do
 done
 
 ask() {  # duplicated from setup.sh deliberately -- see header comment for why
+  if [ "$DRY_RUN" = "1" ]; then echo "  (dry-run) would ask: $1"; return 0; fi  # so run() can show the full plan
   if [ "$ASSUME_YES" = "1" ]; then return 0; fi
   local prompt="$1" reply="n"
   # /dev/tty can exist and pass `-r` yet still fail at actual read time ("Device not configured") in some
@@ -47,7 +48,7 @@ ask() {  # duplicated from setup.sh deliberately -- see header comment for why
   # `reply` unset under `set -u`.
   if [ -t 0 ]; then
     read -r -p "$prompt " reply || reply="n"
-  elif [ -r /dev/tty ] && read -r -p "$prompt " reply < /dev/tty 2>/dev/null; then
+  elif [ -r /dev/tty ] && read -r -p "$prompt " reply 2>/dev/null < /dev/tty; then  # 2> first: the open of /dev/tty is what fails
     :
   else
     echo "(no terminal available to ask '$prompt' -- assuming no)" >&2
@@ -247,10 +248,10 @@ fi
 echo
 echo "== Kit bookkeeping =="
 if [ "$MANIFEST_FOUND" = "1" ] || [ -d "$KIT_DIR" ]; then
-  run "remove $KIT_DIR/server.log, install.env, agents-md.list, *.partial" bash -c "
-    rm -f '$KIT_DIR/server.log' '$INSTALL_ENV' '$AGENTS_LIST' '$KIT_DIR/models/'*.partial 2>/dev/null
-  "
-  echo "removed"
+  # An unmatched glob is passed through literally and rm -f ignores it, so no shell -c re-quoting is needed.
+  run "remove $KIT_DIR/server.log, install.env, agents-md.list, *.partial" \
+    rm -f "$KIT_DIR/server.log" "$INSTALL_ENV" "$AGENTS_LIST" "$KIT_DIR/models/"*.partial
+  [ "$DRY_RUN" = "1" ] || echo "removed"
 else
   echo "nothing to do"
 fi
@@ -270,7 +271,9 @@ else
     echo "kept (--keep-model)"
   elif [ "$PURGE_MODEL" = "1" ]; then
     run "delete $MODEL_PATH" rm -f "$MODEL_PATH"
-    echo "deleted"
+    [ "$DRY_RUN" = "1" ] || echo "deleted"
+  elif [ "$DRY_RUN" = "1" ]; then
+    echo "  (dry-run) would ask whether to delete it -- default no; --purge-model deletes without asking"
   elif [ "$ASSUME_YES" = "1" ]; then
     # ask() returns yes unconditionally under --yes, which would make plain --yes delete the model file --
     # exactly the outcome the header comment promises will NOT happen. This is the one step --yes must never
@@ -292,18 +295,30 @@ fi
 echo
 echo "== Prerequisites (llama.cpp / pi) =="
 if [ "$WE_INSTALLED_LLAMA_SERVER" = "1" ] || [ "$WE_INSTALLED_PI" = "1" ]; then
+  # Plain if/then here, not `[ ... ] && { ask && run; }`: under `set -e`, a braces group that ends with a
+  # failed `ask` (the user answering "no") is the final command of the && list, so the whole script would
+  # exit right there -- before pi's prompt and before "Done".
   if [ "$WE_INSTALLED_LLAMA_SERVER" = "1" ]; then
     echo "this kit installed llama.cpp -- reverse with: brew uninstall llama.cpp"
-    [ "$DO_ALL" = "1" ] && { ask "Uninstall llama.cpp now? [y/N]" && run "brew uninstall llama.cpp" brew uninstall llama.cpp; }
+    if [ "$DO_ALL" = "1" ]; then
+      if ask "Uninstall llama.cpp now? [y/N]"; then run "brew uninstall llama.cpp" brew uninstall llama.cpp; else echo "kept llama.cpp"; fi
+    fi
   fi
   if [ "$WE_INSTALLED_PI" = "1" ]; then
     echo "this kit installed pi -- reverse with: npm uninstall -g @earendil-works/pi-coding-agent"
-    [ "$DO_ALL" = "1" ] && { ask "Uninstall pi now? [y/N]" && run "npm uninstall -g pi" npm uninstall -g @earendil-works/pi-coding-agent; }
+    if [ "$DO_ALL" = "1" ]; then
+      if ask "Uninstall pi now? [y/N]"; then run "npm uninstall -g pi" npm uninstall -g @earendil-works/pi-coding-agent; else echo "kept pi"; fi
+    fi
   fi
-  [ "$DO_ALL" != "1" ] && echo "(pass --all to be offered removal, since these are general-purpose tools)"
+  if [ "$DO_ALL" != "1" ]; then echo "(pass --all to be offered removal, since these are general-purpose tools)"; fi
 else
   echo "neither was installed by this kit (or that isn't recorded) -- nothing offered"
 fi
 
 echo
+if [ "$DRY_RUN" != "1" ]; then
+  for f in "$HOME/.pi/agent/models.json.bak-gemma4-uninstall" "$HOME/.pi/agent/settings.json.bak-gemma4-uninstall"; do
+    [ -f "$f" ] && echo "backup of the pre-uninstall file left at $f (delete it once you're happy)"
+  done
+fi
 echo "== Done. =="

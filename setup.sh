@@ -14,6 +14,10 @@
 #   curl -fsSL <raw>/setup.sh | bash -s -- --upgrade         # reapply current config + restart the server
 #   curl -fsSL <raw>/setup.sh | bash -s -- --report-speed    # measure real tokens/sec on an estimate-only chip
 #
+# Modifiers: --yes answers yes to EVERY prompt, including "install llama.cpp / pi now?" (brew/npm) -- it is
+# explicit consent for an unattended install, so only pass it when that is what you want. --no-exec sets up
+# everything but doesn't start the interactive pi session at the end.
+#
 # One mode needs a real git checkout, not the curl-pipe install, because it has data too large to embed here:
 #
 #   ./setup.sh --benchmark [scenario-id|all]   # grade a running server against the 7-scenario suite in benchmarks/
@@ -160,7 +164,7 @@ ask() {  # ask "question" -> reads y/N from the real terminal, not the pipe's st
   # failed read can never leave `reply` unset under `set -u`.
   if [ -t 0 ]; then
     read -r -p "$prompt " reply || reply="n"
-  elif [ -r /dev/tty ] && read -r -p "$prompt " reply < /dev/tty 2>/dev/null; then
+  elif [ -r /dev/tty ] && read -r -p "$prompt " reply 2>/dev/null < /dev/tty; then  # 2> first: the open of /dev/tty is what fails
     :
   else
     echo "(no terminal available to ask '$prompt' -- assuming no)" >&2
@@ -200,7 +204,7 @@ config_sig() {
 
 detect_hw() {  # sets CHIP, MEM_BYTES, MEM_GB, ARCH -- no exit, callers decide what to do with the result
   if [ "${GEMMA4_KIT_SELFTEST:-0}" = "1" ]; then
-    echo "!! self-test overrides active -- hardware values may be faked; no install will happen !!" >&2
+    echo "!! GEMMA4_KIT_SELFTEST=1: hardware values may be faked -- for CI and testing only !!" >&2
     CHIP="${GEMMA4_KIT_FAKE_CHIP:-$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/Chip/ {print $2}')}"
     MEM_BYTES="${GEMMA4_KIT_FAKE_MEMBYTES:-$(sysctl -n hw.memsize 2>/dev/null || echo 0)}"
     ARCH="${GEMMA4_KIT_FAKE_ARCH:-$(uname -m)}"
@@ -395,8 +399,23 @@ step_download() {
   fi
 
   local url="https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}"
-  echo "Downloading $MODEL_FILE (~9.3GB, this takes a while)..."
-  curl -fL --progress-bar -o "$DEST.partial" "$url"
+  local partial_bytes=0
+  if [ -f "$DEST.partial" ]; then
+    partial_bytes=$(stat -f%z "$DEST.partial" 2>/dev/null || stat -c%s "$DEST.partial" 2>/dev/null || echo 0)
+  fi
+  if [ "$partial_bytes" = "$MODEL_BYTES" ]; then
+    # A previous run finished the download but was killed before the rename -- nothing left to fetch.
+    echo "Found a complete download from an earlier run; verifying it instead of re-downloading."
+  else
+    if [ "$partial_bytes" -gt 0 ]; then
+      echo "Resuming an interrupted download ($partial_bytes of $MODEL_BYTES bytes already on disk)..."
+    else
+      echo "Downloading $MODEL_FILE (~9.3GB, this takes a while)..."
+    fi
+    # -C - resumes from whatever is already in the .partial file; a 9.3GB download that dies at 80% should
+    # cost 20% to finish, not 100%. Hugging Face serves byte ranges, which is what makes this work.
+    curl -fL -C - --progress-bar -o "$DEST.partial" "$url"
+  fi
   local actual; actual=$(stat -f%z "$DEST.partial" 2>/dev/null || stat -c%s "$DEST.partial" 2>/dev/null)
   if [ "$actual" != "$MODEL_BYTES" ]; then
     echo "Download finished but the file size is wrong: got $actual bytes, expected $MODEL_BYTES." >&2
@@ -422,6 +441,11 @@ step_server() {  # $1: "reuse" (default) or "restart" -- restart is what --upgra
   if [ -n "$pid" ]; then
     echo "A server is already running on port $PORT (pid $pid). Reusing it."
   else
+    if [ ! -f "$DEST" ]; then
+      echo "No model at $DEST -- nothing to start. Run setup.sh (without --start-only) to download it first." >&2
+      exit 1
+    fi
+    mkdir -p "$KIT_DIR"
     nohup llama-server -m "$DEST" "${SERVER_FLAGS[@]}" --port "$PORT" \
       > "$KIT_DIR/server.log" 2>&1 &
     disown
@@ -455,12 +479,19 @@ step_config() {
   echo >&2
   echo "== Configuring pi ==" >&2
   mkdir -p "$HOME/.pi/agent"
+  # Every snippet below REFUSES to proceed on a models.json/settings.json that exists but isn't valid JSON.
+  # The earlier version swallowed the parse error and started from `{}`, which would have silently replaced a
+  # user's entire provider list with just ours the moment they had a stray trailing comma in the file.
   PROVIDER_KEY="$PROVIDER_KEY" MODEL_ID="$MODEL_ID" CTX="$CTX" MAX_TOKENS="$MAX_TOKENS" PORT="$PORT" \
   node -e '
     const fs = require("fs");
     const path = process.env.HOME + "/.pi/agent/models.json";
     let cfg = { providers: {} };
-    if (fs.existsSync(path)) { try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {} }
+    if (fs.existsSync(path)) {
+      try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); }
+      catch (e) { console.error(path + " exists but is not valid JSON (" + e.message + ") -- fix or move it first; refusing to overwrite it."); process.exit(3); }
+    }
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) cfg = { providers: {} };
     cfg.providers = cfg.providers || {};
     cfg.providers[process.env.PROVIDER_KEY] = {
       baseUrl: "http://127.0.0.1:" + process.env.PORT + "/v1",
@@ -474,26 +505,37 @@ step_config() {
     };
     fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
     console.error("wrote " + path);
-  '
+  ' || return 3
+  # Explicit `|| return 3` on every node call in this function, not just `set -e`: callers capture this
+  # function with `prior=$(step_config)`, and bash does not carry -e into a command-substitution subshell, so
+  # without these a refused/failed write would print its error and the install would carry on as if it worked.
   local prior
   prior=$(node -e '
     const fs = require("fs");
     const path = process.env.HOME + "/.pi/agent/settings.json";
     let cfg = {};
-    if (fs.existsSync(path)) { try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {} }
+    if (fs.existsSync(path)) {
+      try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); }
+      catch (e) { console.error(path + " exists but is not valid JSON (" + e.message + ") -- fix or move it first; refusing to overwrite it."); process.exit(3); }
+    }
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
     const c = cfg.compaction || {};
     process.stdout.write(
       "reserve=" + (c.reserveTokens === undefined ? "" : c.reserveTokens) +
       " keep=" + (c.keepRecentTokens === undefined ? "" : c.keepRecentTokens) +
       " had_block=" + (cfg.compaction ? 1 : 0)
     );
-  ')
+  ') || return 3
   COMPACT_RESERVE="$COMPACT_RESERVE" COMPACT_KEEP="$COMPACT_KEEP" \
   node -e '
     const fs = require("fs");
     const path = process.env.HOME + "/.pi/agent/settings.json";
     let cfg = {};
-    if (fs.existsSync(path)) { try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {} }
+    if (fs.existsSync(path)) {
+      try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); }
+      catch (e) { console.error(path + " exists but is not valid JSON (" + e.message + ") -- refusing to overwrite it."); process.exit(3); }
+    }
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
     cfg.compaction = cfg.compaction || {};
     // The library defaults (reserveTokens 16384, keepRecentTokens 20000) exceed a 24576-token window and cause
     // endless compaction, reproduced directly this session as a 143-round loop that made zero edits.
@@ -501,8 +543,15 @@ step_config() {
     cfg.compaction.keepRecentTokens = Number(process.env.COMPACT_KEEP);
     fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
     console.error("wrote " + path);
-  '
+  ' || return 3
   printf '%s' "$prior"
+}
+
+configure_or_die() {  # PRIOR=$(step_config) with the failure actually stopping the run -- see step_config's note
+  PRIOR=$(step_config) || {
+    echo "pi's config was NOT written (see the message above) -- nothing else was changed by this step." >&2
+    exit 1
+  }
 }
 
 # Writes AGENTS.md into the CURRENT directory. If one already exists and isn't ours (no marker line, or a
@@ -512,9 +561,9 @@ step_config() {
 step_agents_md() {
   echo
   echo "== Writing AGENTS.md =="
-  local backup=""
+  local backup="" here; here="$(pwd)"
   if [ -f ./AGENTS.md ] && ! grep -qF "gemma4-coding-kit" ./AGENTS.md 2>/dev/null; then
-    backup="./AGENTS.md.pre-gemma4-kit"
+    backup="$here/AGENTS.md.pre-gemma4-kit"
     cp ./AGENTS.md "$backup"
     echo "An existing ./AGENTS.md wasn't ours -- backed it up to $backup before writing."
   fi
@@ -522,8 +571,19 @@ step_agents_md() {
   echo "wrote ./AGENTS.md"
   local sha; sha=$(shasum -a 256 ./AGENTS.md | cut -d' ' -f1)
   mkdir -p "$KIT_DIR"
-  printf '%s\t%s\n' "$sha" "$(pwd)/AGENTS.md" >> "$AGENTS_LIST"
+  # One line per path: a re-install or --upgrade over the same directory replaces that path's recorded sha
+  # rather than appending a stale duplicate uninstall.sh would then trip over.
+  if [ -f "$AGENTS_LIST" ]; then
+    grep -vF -- "$(printf '\t')$here/AGENTS.md" "$AGENTS_LIST" > "$AGENTS_LIST.tmp" || true
+    mv "$AGENTS_LIST.tmp" "$AGENTS_LIST"
+  fi
+  printf '%s\t%s\n' "$sha" "$here/AGENTS.md" >> "$AGENTS_LIST"
   AGENTS_MD_BACKUP="$backup"
+}
+
+manifest_get() {  # manifest_get KEY -> value from the existing install.env, or empty
+  [ -f "$INSTALL_ENV" ] || return 0
+  grep "^$1=" "$INSTALL_ENV" | cut -d= -f2- || true
 }
 
 write_manifest() {  # $1: prior compaction line from step_config ("reserve=X keep=Y had_block=Z")
@@ -531,22 +591,40 @@ write_manifest() {  # $1: prior compaction line from step_config ("reserve=X kee
   reserve=$(printf '%s' "$1" | sed -n 's/.*reserve=\([0-9]*\).*/\1/p')
   keep=$(printf '%s' "$1" | sed -n 's/.*keep=\([0-9]*\).*/\1/p')
   had_block=$(printf '%s' "$1" | sed -n 's/.*had_block=\([0-9]\).*/\1/p')
+  # A re-install or --upgrade over an existing install must NOT overwrite what the FIRST install recorded
+  # about the world before this kit touched it: by now settings.json already holds our compaction values, so
+  # re-reading it would record our own numbers as the "prior" ones and make uninstall's revert a no-op; and
+  # the prerequisites are now present, so re-detecting them would forget that the kit was what installed them.
+  local we_llama="${WE_INSTALLED_LLAMA_SERVER:-0}" we_pi="${WE_INSTALLED_PI:-0}" backup="${AGENTS_MD_BACKUP:-}"
+  local first_install_at; first_install_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -f "$INSTALL_ENV" ]; then
+    if [ "$(manifest_get SETTINGS_HAD_COMPACTION)" != "" ]; then
+      had_block=$(manifest_get SETTINGS_HAD_COMPACTION)
+      reserve=$(manifest_get SETTINGS_PRIOR_RESERVE)
+      keep=$(manifest_get SETTINGS_PRIOR_KEEP)
+    fi
+    [ "$(manifest_get WE_INSTALLED_LLAMA_SERVER)" = "1" ] && we_llama=1
+    [ "$(manifest_get WE_INSTALLED_PI)" = "1" ] && we_pi=1
+    [ -z "$backup" ] && backup=$(manifest_get AGENTS_MD_BACKUP)
+    [ -n "$(manifest_get INSTALLED_AT)" ] && first_install_at=$(manifest_get INSTALLED_AT)
+  fi
   mkdir -p "$KIT_DIR"
   cat > "$INSTALL_ENV" << EOF
 KIT_VERSION=$KIT_VERSION
 CONFIG_SIG=$(config_sig)
-INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+INSTALLED_AT=$first_install_at
+UPDATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 MODEL_PATH=$DEST
 MODEL_BYTES=$MODEL_BYTES
 PORT=$PORT
 PROVIDER_KEY=$PROVIDER_KEY
-WE_INSTALLED_LLAMA_SERVER=${WE_INSTALLED_LLAMA_SERVER:-0}
-WE_INSTALLED_PI=${WE_INSTALLED_PI:-0}
+WE_INSTALLED_LLAMA_SERVER=$we_llama
+WE_INSTALLED_PI=$we_pi
 SETTINGS_HAD_COMPACTION=$had_block
 SETTINGS_PRIOR_RESERVE=$reserve
 SETTINGS_PRIOR_KEEP=$keep
 PI_VERSION=$(pi --version 2>/dev/null || echo "")
-AGENTS_MD_BACKUP=${AGENTS_MD_BACKUP:-}
+AGENTS_MD_BACKUP=$backup
 EOF
   echo "wrote $INSTALL_ENV"
 }
@@ -569,10 +647,11 @@ doctor() {
 
   echo "== gemma4-coding-kit doctor =="
   if [ -f "$INSTALL_ENV" ]; then
-    local installed_ver installed_sig
-    installed_ver=$(grep '^KIT_VERSION=' "$INSTALL_ENV" | cut -d= -f2-)
-    installed_sig=$(grep '^CONFIG_SIG=' "$INSTALL_ENV" | cut -d= -f2-)
-    echo "kit $installed_ver (config $installed_sig), installed $(grep '^INSTALLED_AT=' "$INSTALL_ENV" | cut -d= -f2-)"
+    echo "kit $(manifest_get KIT_VERSION) (config $(manifest_get CONFIG_SIG)), installed $(manifest_get INSTALLED_AT)"
+    local installed_sig; installed_sig=$(manifest_get CONFIG_SIG)
+    if [ -n "$installed_sig" ] && [ "$installed_sig" != "$(config_sig)" ]; then
+      echo "(this script's config is $(config_sig) -- differs from what was installed; see --check / --upgrade)"
+    fi
   else
     echo "(no install.env found -- was this installed with an older kit version, or not installed at all?)"
   fi
@@ -580,14 +659,17 @@ doctor() {
   echo
   echo "== Hardware =="
   detect_hw
-  if hw_gate 2>/tmp/g4kit_hwerr; then
+  local hwerr; hwerr=$(mktemp)
+  if hw_gate 2>"$hwerr"; then
     tag ok "$CHIP, ${MEM_GB}GB unified memory, $ARCH"
   else
-    tag fail "$(cat /tmp/g4kit_hwerr)"
+    tag fail "$(cat "$hwerr")"
   fi
-  rm -f /tmp/g4kit_hwerr
-  mkdir -p "$MODEL_DIR"
-  local free; free=$(free_disk_gb "$MODEL_DIR")
+  rm -f "$hwerr"
+  # Read-only means read-only: probe the nearest directory that already exists rather than creating MODEL_DIR.
+  local probe="$MODEL_DIR"
+  [ -d "$probe" ] || probe="$HOME"
+  local free; free=$(free_disk_gb "$probe")
   if [ -n "$free" ] && [ "$free" -ge "$MODEL_MIN_FREE_GB" ]; then
     tag ok "free disk on $MODEL_DIR: ${free}GB (model needs ~10GB)"
   else
@@ -605,7 +687,7 @@ doctor() {
   if command -v pi >/dev/null 2>&1; then
     tag ok "pi  $(pi --version 2>/dev/null)"
     if [ -f "$INSTALL_ENV" ]; then
-      local recorded_pi; recorded_pi=$(grep '^PI_VERSION=' "$INSTALL_ENV" | cut -d= -f2-)
+      local recorded_pi; recorded_pi=$(manifest_get PI_VERSION)
       local current_pi; current_pi=$(pi --version 2>/dev/null)
       if [ -n "$recorded_pi" ] && [ "$recorded_pi" != "$current_pi" ]; then
         tag warn "pi was $recorded_pi at install, is $current_pi now -- if something broke, try --config-only"
@@ -778,7 +860,7 @@ check() {
     echo "[ ok ] recommended model unchanged."
   fi
   if [ -f "$INSTALL_ENV" ]; then
-    local installed_sig; installed_sig=$(grep '^CONFIG_SIG=' "$INSTALL_ENV" | cut -d= -f2-)
+    local installed_sig; installed_sig=$(manifest_get CONFIG_SIG)
     if [ "$installed_sig" != "$(config_sig)" ]; then
       echo "[stale] your installed config doesn't match this script's current config -- run: setup.sh --upgrade"
       stale=1
@@ -800,14 +882,14 @@ upgrade() {
     echo "No existing install found ($INSTALL_ENV missing). Run setup.sh normally first." >&2
     exit 1
   fi
-  local old_model; old_model=$(grep '^MODEL_PATH=' "$INSTALL_ENV" | cut -d= -f2-)
+  local old_model; old_model=$(manifest_get MODEL_PATH)
   step_hw_gate
   step_prereqs
   step_download
   step_server restart
-  local prior; prior=$(step_config)
+  configure_or_die
   step_agents_md
-  write_manifest "$prior"
+  write_manifest "$PRIOR"
   if [ -n "$old_model" ] && [ "$old_model" != "$DEST" ] && [ -f "$old_model" ]; then
     echo
     if ask "Old model no longer used: $old_model -- delete it? [y/N]"; then
@@ -889,21 +971,27 @@ run_benchmark() {
 # first; this kit never phones home on its own). Accepting a report is then a one-line diff: fill in
 # chip_measured_tps() and one README row, no other code path changes.
 # ============================================================================================================
-timed_completion() {  # prints tokens/sec for one REPORT_PROMPT completion, or "0" if it couldn't measure
-  local t0 t1 body tok wall
-  t0=$(date +%s)
-  body=$(curl -s -m 120 "http://127.0.0.1:$PORT/v1/chat/completions" -H 'content-type: application/json' \
-    -d "$(REPORT_PROMPT="$REPORT_PROMPT" node -e '
-      process.stdout.write(JSON.stringify({
-        messages: [{ role: "user", content: process.env.REPORT_PROMPT }],
-        max_tokens: 256, temperature: 0,
-      }));
-    ')" || true)
-  t1=$(date +%s)
-  tok=$(printf '%s' "$body" | EXPR='j.usage && j.usage.completion_tokens' json_field 2>/dev/null || true)
-  wall=$(( t1 - t0 ))
-  if [ -z "$tok" ] || [ "$tok" = "0" ] || [ "$wall" -le 0 ]; then echo "0"; return; fi
-  awk -v tok="$tok" -v wall="$wall" 'BEGIN { printf "%.1f", tok/wall }'
+# Prints tokens/sec for one REPORT_PROMPT completion, or "0" if it couldn't measure. The request and the
+# timing both live in one node process: llama-server's own `timings.predicted_per_second` (pure generation
+# rate, prompt processing excluded) is preferred, with a millisecond wall-clock fallback. Whole-second `date`
+# timing was rejected -- on the fast chips this exists to measure, 256 tokens finish in ~2s, where rounding to
+# a whole second is a 30-50% error.
+timed_completion() {
+  REPORT_PROMPT="$REPORT_PROMPT" PORT="$PORT" node -e '
+    const t0 = performance.now();
+    fetch("http://127.0.0.1:" + process.env.PORT + "/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: process.env.REPORT_PROMPT }], max_tokens: 256, temperature: 0 }),
+      signal: AbortSignal.timeout(120_000),
+    }).then(async (r) => {
+      const j = await r.json();
+      const wall = (performance.now() - t0) / 1000;
+      const fromServer = j && j.timings && Number(j.timings.predicted_per_second);
+      const tok = j && j.usage && Number(j.usage.completion_tokens);
+      const tps = fromServer > 0 ? fromServer : (tok > 0 && wall > 0 ? tok / wall : 0);
+      process.stdout.write(tps > 0 ? tps.toFixed(1) : "0");
+    }).catch(() => process.stdout.write("0"));
+  '
 }
 
 report_speed() {
@@ -960,9 +1048,11 @@ case "$MODE" in
     # call is wrapped in a command substitution), not always exactly one column -- an exact-one-char version
     # silently never matched any closing line in this file, confirmed directly, so every extracted snippet used
     # to end with a stray quote (or quote-paren) line.
-    awk '
+    # The quote character is passed in via -v rather than written as \x27, which not every awk (mawk on
+    # Ubuntu, where CI's js-syntax job runs) understands inside a regex.
+    awk -v q="'" '
       /node -e .$/ { n++; print "--- snippet " n " ---"; capture=1; next }
-      capture && /^[ \t]*\x27\)?$/ { capture=0; next }
+      capture && $0 ~ ("^[ \t]*" q "\\)?$") { capture=0; next }
       capture { print }
     ' "$0"
     exit 0
@@ -988,8 +1078,8 @@ case "$MODE" in
     upgrade
     ;;
   config-only)
-    prior=$(step_config)
-    write_manifest "$prior"
+    configure_or_die
+    write_manifest "$PRIOR"
     step_agents_md
     echo
     echo "Config rewritten. Nothing was downloaded and the server was not touched."
@@ -1002,9 +1092,9 @@ case "$MODE" in
     step_prereqs
     step_download
     step_server reuse
-    prior=$(step_config)
+    configure_or_die
     step_agents_md
-    write_manifest "$prior"
+    write_manifest "$PRIOR"
     echo
     if [ "$NO_EXEC" = "1" ]; then
       echo "== Ready. (--no-exec set, not starting pi.) =="
