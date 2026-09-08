@@ -121,11 +121,15 @@ EOF
 
 ask() {  # ask "question" -> reads y/N from the real terminal, not the pipe's stdin
   if [ "$ASSUME_YES" = "1" ]; then return 0; fi
-  local prompt="$1" reply
+  local prompt="$1" reply="n"
+  # /dev/tty can exist and pass `-r` yet still fail at actual read time ("Device not configured") in some
+  # sandboxed/detached-process environments with no controlling terminal at all -- confirmed by testing, not
+  # just a theoretical case. `read`'s own exit status, not just -t 0 / -r /dev/tty, decides the fallback, so a
+  # failed read can never leave `reply` unset under `set -u`.
   if [ -t 0 ]; then
-    read -r -p "$prompt " reply
-  elif [ -r /dev/tty ]; then
-    read -r -p "$prompt " reply < /dev/tty
+    read -r -p "$prompt " reply || reply="n"
+  elif [ -r /dev/tty ] && read -r -p "$prompt " reply < /dev/tty 2>/dev/null; then
+    :
   else
     echo "(no terminal available to ask '$prompt' -- assuming no)" >&2
     reply="n"
