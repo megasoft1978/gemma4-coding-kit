@@ -42,9 +42,19 @@ script into `bash`? Read `setup.sh` first — one self-contained file, every com
 
 ## Benchmarks
 
-**28/30 (93%)** — bugs fixed across 7 realistic multi-file projects (React + Express + TypeScript), reported
-the way you'd actually describe them to a coding agent: by symptom, never by cause. That's the number that
-matters, because that's how people use one.
+Bugs fixed across 7 realistic multi-file projects (React + Express + TypeScript), reported the way you'd
+actually describe them to a coding agent: by symptom, never by cause. That's the number that matters, because
+that's how people use one.
+
+| Mode | Score |
+|---|---|
+| Single answer | **28/30 (93%)** |
+| One self-correct retry (`--retry`) | **30/30 (100%)** |
+
+The retry number isn't the shipped default — it's a second measurement. `pi` gets one shot per turn; this is
+what happens if you show the model exactly which of its own checks still fail and let it take one more pass.
+Both of this suite's remaining misses (below) are the model silently skipping a file it needed to touch — this
+is exactly the kind of thing pointing it out, concretely, fixes.
 
 Runs in about 10GB total: ~9.3GB of model weights on disk, plus ~1GB of working memory while the server runs.
 
@@ -77,6 +87,13 @@ scenario data doesn't fit in a single script).
 
 Not perfectly lossless: at temperature 0, one bug flips depending on speculative decoding being on or off — a
 real, deterministic side effect of batch-shape-dependent floating-point rounding, not noise.
+
+Also tried and rejected on the single-answer score: strengthening the prompt to demand every file get touched
+(made things worse — 25/30, broke a scenario that was already passing); raising temperature or changing
+sampling (both alternatives tried scored worse than temperature 0); a bigger `max_tokens` (no effect, truncation
+was never the limiter); a few-shot example in the prompt (worse — 26/30, confirming this size of model can
+regress on few-shot); two alternative quantizations from other GGUF publishers (25/30 and 22/30 — this kit's
+quant is a better fit for this suite than either).
 
 </details>
 
@@ -115,9 +132,9 @@ so every model tested passes them near-ceiling.*
 > sometimes includes or misses orders depending on what time of day you check, and a filter panel on the
 > frontend seems to cause endless re-fetching once you touch it.
 
-| Bug | What it tests | Shipped | Optional recipe |
-|---|---|---|---|
-| A | async route errors reach the error handler instead of hanging | ❌ fail — the model never wrote `server/routes/orders` at all | ❌ fail — same: the file was never emitted |
+| Bug | What it tests | Shipped | Optional recipe | With one retry |
+|---|---|---|---|---|
+| A | async route errors reach the error handler instead of hanging | ❌ fail — the model never wrote `server/routes/orders` at all | ❌ fail — same: the file was never emitted | ✅ pass — shown "this file was never written," it wrote it |
 
 </details>
 
@@ -130,9 +147,9 @@ so every model tested passes them near-ceiling.*
 > repeatedly seems to make things worse over time. Edits can occasionally be acknowledged before they're actually
 > saved. And once in a while two different edits get merged together as if they were the same one.
 
-| Bug | What it tests | Shipped | Optional recipe |
-|---|---|---|---|
-| B | a failed send re-queues its edit instead of discarding it | ❌ fail — the model never wrote `client/src/sync/queue` at all | ❌ fail — it did write the file, but cleared the queue unconditionally instead of re-queuing the failed send |
+| Bug | What it tests | Shipped | Optional recipe | With one retry |
+|---|---|---|---|---|
+| B | a failed send re-queues its edit instead of discarding it | ❌ fail — the model never wrote `client/src/sync/queue` at all | ❌ fail — it did write the file, but cleared the queue unconditionally instead of re-queuing the failed send | ✅ pass — one more pass, told what still failed, got it right |
 
 </details>
 
