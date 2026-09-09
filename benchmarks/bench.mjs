@@ -19,13 +19,17 @@ const SCEN_DIR = path.join(HERE, "scenarios");
 const ORACLE_DIR = path.join(HERE, "oracle");
 
 function parseArgs(argv) {
-  const args = { target: "all", port: 8114, maxTokens: 3072, timeoutMs: 300_000 };
+  // --retry is an experimental, opt-in second measurement ("symptom, one retry") -- never the shipped default,
+  // never run by setup.sh --benchmark. It changes what a run measures (two model turns instead of one), so it
+  // must never silently change plain `bench.mjs all` output.
+  const args = { target: "all", port: 8114, maxTokens: 3072, timeoutMs: 300_000, retry: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--port") args.port = Number(argv[++i]);
     else if (a === "--max-tokens") args.maxTokens = Number(argv[++i]);
     else if (a === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
+    else if (a === "--retry") args.retry = true;
     else rest.push(a);
   }
   if (rest[0]) args.target = rest[0];
@@ -60,7 +64,7 @@ function buildSymptomPrompt(scenario) {
   );
 }
 
-async function complete(prompt, { port, maxTokens, timeoutMs }) {
+async function complete(messages, { port, maxTokens, timeoutMs }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -68,7 +72,7 @@ async function complete(prompt, { port, maxTokens, timeoutMs }) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messages: [{ role: "user", content: prompt }],
+        messages,
         max_tokens: maxTokens,
         temperature: 0,
       }),
@@ -94,6 +98,24 @@ async function complete(prompt, { port, maxTokens, timeoutMs }) {
   }
 }
 
+// Built only from grade()'s own `reason` field -- the model is shown exactly what a human reading the grader's
+// output would see, nothing invented. Bugs with no reason (already passing, or an old-format record with no
+// reason captured) are omitted; a scenario where nothing failed never reaches this function (see runScenario).
+function buildRetryPrompt(bugs) {
+  const failing = bugs.filter((b) => !b.pass);
+  const lines = failing.map((b) => `- ${b.label}: still not fixed (${b.reason ?? "no further detail"})`);
+  return (
+    `That didn't fully fix it. These checks still fail:\n${lines.join("\n")}\n\n` +
+    `Output the complete corrected content of only the files that still need to change, in the same format ` +
+    `as before (\`=== <path> ===\` then a fenced code block). No explanation.`
+  );
+}
+
+function gradeAndScore(scenario, rawOutput, scratchDir) {
+  const bugs = grade(scenario, rawOutput, ORACLE_DIR, scratchDir);
+  return { bugs, pass: bugs.filter((b) => b.pass).length };
+}
+
 async function runScenario(scenario, opts) {
   const t0 = Date.now();
   if (scenario.valid_modes && !scenario.valid_modes.includes("symptom")) {
@@ -102,29 +124,70 @@ async function runScenario(scenario, opts) {
   const prompt = buildSymptomPrompt(scenario);
   let content, reasoning, completion_tokens, tps, prompt_tps, draft_accept;
   try {
-    ({ content, reasoning, completion_tokens, tps, prompt_tps, draft_accept } = await complete(prompt, opts));
+    ({ content, reasoning, completion_tokens, tps, prompt_tps, draft_accept } =
+      await complete([{ role: "user", content: prompt }], opts));
   } catch (e) {
     const wall_s = (Date.now() - t0) / 1000;
     const timedOut = e.name === "AbortError";
     return { scenario: scenario.id, verdict: timedOut ? "timeout" : "error", detail: e.message, wall_s };
   }
-  const wall_s = (Date.now() - t0) / 1000;
+  const wall_s1 = (Date.now() - t0) / 1000;
   if (!content && reasoning) {
-    return { scenario: scenario.id, verdict: "empty-reasoning", detail: "reasoning channel non-empty, content empty", wall_s };
+    return { scenario: scenario.id, verdict: "empty-reasoning", detail: "reasoning channel non-empty, content empty", wall_s: wall_s1 };
   }
   if (!content) {
-    return { scenario: scenario.id, verdict: "error", detail: "empty response", wall_s };
+    return { scenario: scenario.id, verdict: "error", detail: "empty response", wall_s: wall_s1 };
   }
 
   const scratchDir = mkdtempSync(path.join(tmpdir(), "gemma4-kit-bench-"));
   try {
-    const bugs = grade(scenario, content, ORACLE_DIR, scratchDir);
-    const pass = bugs.filter((b) => b.pass).length;
-    return { scenario: scenario.id, verdict: "ok", pass, total: bugs.length, wall_s, completion_tokens, tps, prompt_tps, draft_accept, bugs };
+    const first = gradeAndScore(scenario, content, scratchDir);
+
+    if (!opts.retry || first.pass === first.bugs.length) {
+      // Plain single-shot path, byte-for-byte the same result shape as before --retry existed.
+      return {
+        scenario: scenario.id, verdict: "ok", pass: first.pass, total: first.bugs.length, wall_s: wall_s1,
+        completion_tokens, tps, prompt_tps, draft_accept, bugs: first.bugs,
+      };
+    }
+
+    // Retry path: one more turn, shown the model's own first answer plus which checks still fail, in the
+    // model's own words via grade()'s `reason` field.
+    const messages = [
+      { role: "user", content: prompt },
+      { role: "assistant", content },
+      { role: "user", content: buildRetryPrompt(first.bugs) },
+    ];
+    let content2, completion_tokens2, tps2;
+    try {
+      ({ content: content2, completion_tokens: completion_tokens2, tps: tps2 } = await complete(messages, opts));
+    } catch (e) {
+      // Retry call itself failed -- report the first-turn result as final rather than losing the run, with a
+      // note that the retry didn't happen.
+      const wall_s = (Date.now() - t0) / 1000;
+      return {
+        scenario: scenario.id, verdict: "ok", pass: first.pass, total: first.bugs.length, wall_s,
+        completion_tokens, tps, prompt_tps, draft_accept, bugs: first.bugs,
+        retry: { attempted: true, error: e.message },
+      };
+    }
+    const wall_s = (Date.now() - t0) / 1000;
+    // Later `=== path ===` blocks win in grade.mjs's splitFiles(), so concatenating turn 1 + turn 2 lets a
+    // retry that only re-emits the files it changed still overlay correctly onto the first turn's untouched
+    // files -- the same "a follow-up turn supersedes" semantics the format was designed around.
+    const combined = `${content}\n\n${content2 ?? ""}`;
+    const final = gradeAndScore(scenario, combined, scratchDir);
+    return {
+      scenario: scenario.id, verdict: "ok", pass: final.pass, total: final.bugs.length, wall_s,
+      completion_tokens: (completion_tokens ?? 0) + (completion_tokens2 ?? 0), tps, prompt_tps, draft_accept,
+      bugs: final.bugs,
+      retry: { attempted: true, pass_before: first.pass, total_before: first.bugs.length, tps_turn2: tps2 },
+    };
   } catch (e) {
     // grade() itself threw (not an oracle failure -- those come back as pass:false). Most likely a Node too
     // old for --experimental-strip-types, or a missing oracle tree. Reported per scenario, never re-thrown,
     // so one broken scenario can't abort the rest of the batch.
+    const wall_s = (Date.now() - t0) / 1000;
     return { scenario: scenario.id, verdict: "error", detail: `grading failed: ${e.message}`, wall_s };
   } finally {
     rmSync(scratchDir, { recursive: true, force: true });
