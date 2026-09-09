@@ -120,13 +120,55 @@ function pyPattern(p) {
   return p.replace(/\\A/g, "^").replace(/\\[Zz]/g, "$");
 }
 
-function evalBug(bug, out, files) {
+function scopeLabel(file) {
+  return Array.isArray(file) ? file.join(", ") : file;
+}
+
+/** Same pass/fail short-circuit order and conditions as before -- this must never change what passes or
+ * fails, only add a human-readable `reason` alongside it. `fileMissing` is folded into whichever branch
+ * already decided false, since an empty scope is usually the actual cause (the model never emitted that
+ * file, or emitted it under a differently-shaped path) rather than the literal rule that fires against "". */
+export function evalBug(bug, out, files) {
   const text = scopeText(out, files, bug.file ?? null);
-  if ((bug.forbid || []).some((p) => new RegExp(pyPattern(p)).test(text))) return false;
-  if (bug.all && !bug.all.every((p) => new RegExp(pyPattern(p)).test(text))) return false;
-  if (bug.any && !bug.any.some((p) => new RegExp(pyPattern(p)).test(text))) return false;
-  if (bug.pass && !new RegExp(pyPattern(bug.pass)).test(text)) return false;
-  return Boolean(bug.all || bug.any || bug.pass);
+  const fileMissing = bug.file != null && text.trim() === "";
+  const forbidHit = (bug.forbid || []).find((p) => new RegExp(pyPattern(p)).test(text));
+  if (forbidHit) {
+    return {
+      pass: false,
+      reason: fileMissing
+        ? `file not found in output: ${scopeLabel(bug.file)}`
+        : `matched forbidden pattern: ${forbidHit}`,
+    };
+  }
+  if (bug.all) {
+    const missing = bug.all.find((p) => !new RegExp(pyPattern(p)).test(text));
+    if (missing) {
+      return {
+        pass: false,
+        reason: fileMissing ? `file not found in output: ${scopeLabel(bug.file)}` : `missing required pattern: ${missing}`,
+      };
+    }
+  }
+  if (bug.any && !bug.any.some((p) => new RegExp(pyPattern(p)).test(text))) {
+    return {
+      pass: false,
+      reason: fileMissing
+        ? `file not found in output: ${scopeLabel(bug.file)}`
+        : `none of ${bug.any.length} expected patterns found`,
+    };
+  }
+  if (bug.pass && !new RegExp(pyPattern(bug.pass)).test(text)) {
+    return {
+      pass: false,
+      reason: fileMissing
+        ? `file not found in output: ${scopeLabel(bug.file)}`
+        : `expected pattern not found: ${bug.pass}`,
+    };
+  }
+  if (!(bug.all || bug.any || bug.pass)) {
+    return { pass: false, reason: "bug has no all/any/pass rule defined" };
+  }
+  return { pass: true, reason: null };
 }
 
 /** Overlay a model's emitted files onto the scenario's base files, applying the import fixup to every .ts/.tsx
@@ -168,6 +210,7 @@ function runOracle(scenarioId, oracleRoot, workDir) {
 export function grade(scenario, rawOutput, oracleRoot, scratchDir) {
   const oracleKeys = new Set(scenario.bugs.filter((b) => b.oracle).map((b) => b.key));
   let failedKeys = new Set();
+  const failReasons = new Map();
 
   if (oracleKeys.size > 0) {
     const emitted = splitFiles(rawOutput);
@@ -178,20 +221,31 @@ export function grade(scenario, rawOutput, oracleRoot, scratchDir) {
       const { ok, output } = runOracle(scenario.id, oracleRoot, work);
       for (const line of output.split("\n")) {
         if (line.startsWith("FAIL ")) {
-          const key = line.slice(5).split(":")[0].split(" ")[0].trim();
+          const rest = line.slice(5); // e.g. "A: a token issued moments ago ... " or "A some message"
+          const key = rest.split(":")[0].split(" ")[0].trim();
+          const colon = rest.indexOf(":");
           failedKeys.add(key);
+          if (colon !== -1) failReasons.set(key, rest.slice(colon + 1).trim());
         }
       }
-      if (!ok && failedKeys.size === 0) failedKeys = new Set(oracleKeys); // crash: fail closed, not open
+      if (!ok && failedKeys.size === 0) {
+        // crash: fail closed, not open -- a real bug this exact port fixed once already (see runOracle's docstring)
+        failedKeys = new Set(oracleKeys);
+        const firstLine = output.split("\n").find((l) => l.trim()) || "no output";
+        for (const k of oracleKeys) failReasons.set(k, `oracle crashed: ${firstLine.trim()}`);
+      }
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
   }
 
   const files = splitFiles(rawOutput);
-  return scenario.bugs.map((b) => ({
-    key: b.key,
-    label: b.label,
-    pass: b.oracle ? !failedKeys.has(b.key) : evalBug(b, rawOutput, files),
-  }));
+  return scenario.bugs.map((b) => {
+    if (b.oracle) {
+      const pass = !failedKeys.has(b.key);
+      return { key: b.key, label: b.label, pass, reason: pass ? null : failReasons.get(b.key) ?? null };
+    }
+    const { pass, reason } = evalBug(b, rawOutput, files);
+    return { key: b.key, label: b.label, pass, reason: pass ? null : reason };
+  });
 }
