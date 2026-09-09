@@ -92,7 +92,9 @@ measures your real number and prints a pre-filled issue link — nothing sent au
 Every flag above was re-tested with `setup.sh --benchmark all` (7 scenarios, 36 bugs, temperature 0), one
 change at a time against the same binary. Speed is llama-server's `predicted_per_second`; memory is macOS
 `footprint` (dirty pages — what actually competes with your other apps; the 9.3GB of weights sit on top as
-clean, evictable file-backed pages).
+clean, evictable file-backed pages). Full per-bug breakdown — what each of the 36 checks tests, and why it
+passed or failed on every configuration — is in [`BENCHMARKS.md`](BENCHMARKS.md) and this
+[interactive report](https://claude.ai/code/artifact/3284dc64-5776-438a-b349-e76012b49945).
 
 | Config | Bugs fixed | tok/s | Draft accept | Memory | Verdict |
 |---|---|---|---|---|---|
@@ -140,8 +142,10 @@ blow the output budget on one scenario). Both ruled out on the same suite; what'
 
 Requantizing only the always-on tensors — attention and the tied embedding, `Q5_K` → `Q4_K` — while leaving
 every expert tensor untouched cuts bytes read per token by 10% and measured **+9.4% decode speed (llama-bench
-tg128) with no quality loss** on the benchmark suite. It's not the shipped default because it produces a new
-model file this kit doesn't host — but it's three commands if you want it:
+tg128) with no quality loss** on the benchmark suite — confirmed across two independent runs at 28/30 counted
+scenarios, +12% suite-level tok/s over the shipped default ([full numbers](BENCHMARKS.md)). It's not the
+shipped default because it produces a new model file this kit doesn't host — but it's three commands if you
+want it:
 
 ```
 curl -fsSL -o imatrix.gguf https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/imatrix_unsloth.gguf_file
