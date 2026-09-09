@@ -1,5 +1,5 @@
-KIT_VERSION=2026.09.09
-CONFIG_SIG=741661d260633a07
+KIT_VERSION=2026.09.10
+CONFIG_SIG=138fbea8e49902d9
 MODEL_FILE=gemma-4-26B-A4B-it-UD-IQ2_M.gguf
 MODEL_BYTES=10014755296
-NOTES=Removed --cache-reuse (a no-op on Gemma 4; prefix caching is automatic). Config change: run --upgrade to restart the server without it.
+NOTES=Added --ctx-checkpoints 0 --cache-ram 0: cuts peak dirty memory 4.87GB -> 1.02GB over a long session with no change in speed or benchmark score. The earlier README explanation blamed the KV cache for that growth; it was llama-server's own bookkeeping (context checkpoints + a RAM prompt cache), not KV, which is a fixed 780MB on this model. Config change: run --upgrade to restart the server with it.

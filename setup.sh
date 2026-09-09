@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.09"
+KIT_VERSION="2026.09.10"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -117,7 +117,14 @@ COMPACT_KEEP=6000
 # supported by this context, it will be disabled" -- the flag was a silent no-op. The 100x repeat-prompt TTFT
 # win the kit relies on comes from llama-server's automatic prefix caching, which needs no flag at all
 # (measured: 1262-token prompt 7376ms cold, 71ms on repeat with cache_n=1262).
-SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off)
+# --ctx-checkpoints 0 --cache-ram 0: llama-server's defaults (32 context checkpoints + an 8GiB RAM prompt
+# cache) are what was growing dirty memory to ~4.8GB over a long session -- not the KV cache, which is a fixed
+# 780MB on this model (25 of 30 layers use a 1024-token sliding window). Turning both off measured 4.87GB ->
+# 1.02GB peak dirty footprint with no change in generation speed or benchmark score (7-scenario suite, same
+# server binary, --benchmark all). The cost: a mid-conversation edit earlier than your last message forces a
+# full prompt re-process instead of a partial one -- rare in a single-topic coding session, and --doctor will
+# tell you if you ever want to trade some of that memory back for it (raise --ctx-checkpoints).
+SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --ctx-checkpoints 0 --cache-ram 0)
 # Pinned into config_sig deliberately: --spec-type ngram-simple's acceptance rate is prompt-dependent, so if
 # this text ever changed without a version bump, reports collected before and after the change would silently
 # describe two different measurements while claiming to be the same number.
@@ -129,7 +136,7 @@ VERSION_URL="https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/ma
 # Substrings doctor checks for in the running server's own command line -- kept separate from SERVER_FLAGS
 # because some flags take a value (`-c 24576`) and checking that as one substring is more reliable than
 # checking `-c` and `24576` independently, which could each appear for unrelated reasons.
-CHECK_STRINGS=("-c $CTX" "-ngl 99" "-fa on" "-np 1" "--no-warmup" "--spec-type ngram-simple" "--reasoning off")
+CHECK_STRINGS=("-c $CTX" "-ngl 99" "-fa on" "-np 1" "--no-warmup" "--spec-type ngram-simple" "--reasoning off" "--ctx-checkpoints 0" "--cache-ram 0")
 
 # Only used by --benchmark, which needs a real git checkout (benchmarks/ is too large to embed in this
 # self-contained script) -- every other mode ignores these.
