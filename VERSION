@@ -1,5 +1,5 @@
-KIT_VERSION=2026.09.08
-CONFIG_SIG=6b57612871a2c21b
+KIT_VERSION=2026.09.09
+CONFIG_SIG=741661d260633a07
 MODEL_FILE=gemma-4-26B-A4B-it-UD-IQ2_M.gguf
 MODEL_BYTES=10014755296
-NOTES=Initial versioned release.
+NOTES=Removed --cache-reuse (a no-op on Gemma 4; prefix caching is automatic). Config change: run --upgrade to restart the server without it.

@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.08"
+KIT_VERSION="2026.09.09"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -113,7 +113,11 @@ CTX=24576
 MAX_TOKENS=3072
 COMPACT_RESERVE=3072
 COMPACT_KEEP=6000
-SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --cache-reuse 256)
+# No --cache-reuse: on Gemma 4's sliding-window-attention context llama-server logs "cache_reuse is not
+# supported by this context, it will be disabled" -- the flag was a silent no-op. The 100x repeat-prompt TTFT
+# win the kit relies on comes from llama-server's automatic prefix caching, which needs no flag at all
+# (measured: 1262-token prompt 7376ms cold, 71ms on repeat with cache_n=1262).
+SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off)
 # Pinned into config_sig deliberately: --spec-type ngram-simple's acceptance rate is prompt-dependent, so if
 # this text ever changed without a version bump, reports collected before and after the change would silently
 # describe two different measurements while claiming to be the same number.
@@ -125,7 +129,7 @@ VERSION_URL="https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/ma
 # Substrings doctor checks for in the running server's own command line -- kept separate from SERVER_FLAGS
 # because some flags take a value (`-c 24576`) and checking that as one substring is more reliable than
 # checking `-c` and `24576` independently, which could each appear for unrelated reasons.
-CHECK_STRINGS=("-c $CTX" "-ngl 99" "-fa on" "-np 1" "--no-warmup" "--spec-type ngram-simple" "--reasoning off" "--cache-reuse 256")
+CHECK_STRINGS=("-c $CTX" "-ngl 99" "-fa on" "-np 1" "--no-warmup" "--spec-type ngram-simple" "--reasoning off")
 
 # Only used by --benchmark, which needs a real git checkout (benchmarks/ is too large to embed in this
 # self-contained script) -- every other mode ignores these.
@@ -271,7 +275,7 @@ chip_bandwidth() {
 # chips" section) -- no other code path changes.
 chip_measured_tps() {
   case "$1" in
-    "Apple M1") echo 18.6 ;;   # Mac mini M1 16GB, EXP-047, --spec-type ngram-simple --reasoning off --cache-reuse 256
+    "Apple M1") echo 18.6 ;;   # Mac mini M1 16GB, EXP-047, --spec-type ngram-simple --reasoning off (new-code prompt; repairs run ~25)
     *)          echo ""   ;;
   esac
 }

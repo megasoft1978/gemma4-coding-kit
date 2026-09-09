@@ -49,7 +49,7 @@ still hold real quality at 16GB — that's the actual gap it fills.
 |---|---|---|
 | Model | `UD-IQ2_M` quant | Measured at 90% quality on a symptom-report coding suite at this size — not the smallest quant available, the one actually tested. |
 | `--spec-type ngram-simple` | on | 1.42× decode speed on the repair suite (24.9 vs 17.5 tok/s). Not perfectly lossless: one bug in 36 flipped (see "Levers measured" below). |
-| `--cache-reuse 256` | on | 41× faster time-to-first-token on repeated context (7.08s → 0.17s, measured). |
+| Prompt prefix caching | automatic, no flag | 100× faster time-to-first-token on repeated context (1262-token prompt: 7.4s cold → 0.07s on repeat, measured). An earlier version of this kit credited `--cache-reuse 256` for this; llama-server actually logs that flag as *disabled* on Gemma 4's sliding-window context — the win was the built-in prefix cache all along, so the flag is gone. |
 | `--reasoning off` | on, not optional | With thinking enabled, this model produced 46,615 characters of internal reasoning and a **completely empty final answer**, even at 24k context and a 16k output ceiling. It doesn't converge on coding tasks. |
 | Context window | 24576 | Validated boot + smoke-test size on this model. |
 | `pi` `maxTokens` | 3072 | The naive default (12000) halves the usable input budget for no benefit. |
@@ -120,7 +120,8 @@ either way. Turning an accepted report into an updated row is a one-line diff on
 ## Levers measured, and why the defaults are what they are
 
 Every server flag above was re-tested with `setup.sh --benchmark all` (7 scenarios, 36 bugs, temperature 0)
-against the same server binary, one change at a time. Generation speed is llama-server's own `predicted_per_second`
+against the same server binary, one change at a time. (The sweep also caught one flag that did nothing — see
+the prefix-caching row above.) Generation speed is llama-server's own `predicted_per_second`
 (prompt processing excluded); memory is macOS `footprint` (dirty pages — the number that actually competes with
 your other apps; the 9.3GB of model weights are clean file-backed pages on top of it).
 
