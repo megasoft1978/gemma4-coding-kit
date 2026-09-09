@@ -133,10 +133,29 @@ your other apps; the 9.3GB of model weights are clean file-backed pages on top o
 | `ngram-mod` | 34/36 | 23.0 | 49% | 8% slower than default |
 | `ngram-map-k4v` | 34/36 | 19.3 | 45% | slow |
 | default + KV cache q8_0 | 34/36 | 19.7 | 48% | −20% speed, −39% peak memory |
+| Gemma 4's official MTP drafter (`draft-mtp`, +440MB) | 33/36 | 22.1 | **94%** | slower despite near-perfect drafting — see below |
+| default, 6 experts per token instead of 8 | 30/36 | 26.3 | 47% | +6% speed, −3 bugs: rejected |
+| default, 4 experts per token | 27/36 | 28.6 | 47% | +15% speed, −6 bugs: rejected |
+| default + `-ub 2048 -b 2048` (prefill batch) | — | — | — | cold TTFT −8% (7.3→6.7s) for +360MB idle memory: rejected |
 
-Three things worth knowing from this table:
+Every challenger lost to the shipped default on quality×speed. Five things worth knowing from this table:
 
-- **Speculative decoding is where the speed comes from, and it's workload-dependent.** Draft acceptance runs
+- **Speculative decoding barely pays on a mixture-of-experts model, no matter how good the drafter.** Gemma 4
+  ships an official multi-token-prediction head; it drafts at 94% acceptance here and is still *slower* than the
+  crude n-gram lookup (22.1 vs 24.9 tok/s), and with 1–2 draft tokens it's slower than no speculation at all.
+  The reason is bytes, not compute: verifying k drafted tokens routes each one to its own 8-of-128 experts, so
+  expert weight traffic grows ~k× per step — on a bandwidth-bound machine that eats most of what the accepted
+  tokens saved. N-gram wins only because its drafts cost nothing to produce.
+- **Cheaper routing is not free.** Using 6 or 4 experts per token instead of 8 (`--override-kv
+  gemma4.expert_used_count`) is a clean +6% / +15% on speed and a clear −3 / −6 bugs on quality — well outside
+  the suite's noise. Gemma 4's one shared expert does not absorb the loss the way models with larger always-on
+  paths do.
+
+- **Time-to-first-token is dominated by prompt processing, and the cache does the heavy lifting.** This MoE
+  prefills at only ~175 tok/s on an M1 (a 6k-token first prompt is ~35s), but llama-server's built-in prefix
+  cache turns a repeated 1262-token prompt from 7.4s into 0.07s with no flag at all. Bigger prefill batches
+  bought 8% and cost 360MB; not shipped.
+- **N-gram speculation is where the decode speed comes from, and it's workload-dependent.** Draft acceptance runs
   50–64% when the model is *repairing* files it was shown (it copies most of them back) and 16–27% when it's
   writing *new* code (`notify-channel`, `realtime-sync`). Expect ~25 tok/s on fixes and ~18 on fresh code; the
   18.6 headline number above is the conservative one.
