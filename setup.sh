@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.10"
+KIT_VERSION="2026.09.11"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -282,13 +282,18 @@ chip_bandwidth() {
 # chips" section) -- no other code path changes.
 chip_measured_tps() {
   case "$1" in
-    "Apple M1") echo 18.6 ;;   # Mac mini M1 16GB, EXP-047, --spec-type ngram-simple --reasoning off (new-code prompt; repairs run ~25)
+    # Mac mini M1 16GB, EXP-055 (research repo), the shipped 7-scenario/36-bug suite itself, not a synthetic
+    # micro-benchmark: mean tok/s across 21 confirmed suite runs under this exact server config. The kit's
+    # own levers table (README "What was tried and what shipped") uses the same metric, so this number and
+    # that table finally agree -- an earlier value here (18.6) measured a single unrelated short completion
+    # under a since-changed server config and was never reconciled with the rest of this file.
+    "Apple M1") echo 23.6 ;;
     *)          echo ""   ;;
   esac
 }
 
 speed_line() {  # prints the measured-or-estimated speed line for $CHIP; requires detect_hw to have run
-  local bw m1_bw=68 m1_tps=18.6 measured est
+  local bw m1_bw=68 m1_tps=23.6 measured est
   bw=$(chip_bandwidth "$CHIP")
   measured=$(chip_measured_tps "$CHIP")
   if [ -n "$measured" ]; then

@@ -60,14 +60,14 @@ Runs in about 10GB total: ~9.3GB of model weights on disk, plus ~1GB of working 
 
 | Chip | tokens/sec |
 |---|---|
-| M1 | **18.6 — measured** |
-| M2 / M3 | ~27.4 — estimated |
-| M2 Pro | ~54.7 — estimated |
-| M3 Pro | ~41.0 — estimated |
-| M1/M2/M3 Max | ~109.4 — estimated |
-| M4 | ~32.8 — estimated |
-| M4 Pro | ~74.7 — estimated |
-| M4 Max | ~149.3 — estimated |
+| M1 | **23.6 — measured** (mean across the full suite, shipped config) |
+| M2 / M3 | ~34.7 — estimated |
+| M2 Pro | ~69.4 — estimated |
+| M3 Pro | ~52.1 — estimated |
+| M1/M2/M3 Max | ~138.8 — estimated |
+| M4 | ~41.6 — estimated |
+| M4 Pro | ~94.7 — estimated |
+| M4 Max | ~189.5 — estimated |
 
 Non-M1 numbers are estimated from published memory bandwidth, not measured — run `--report-speed` to contribute
 a real one. `setup.sh --benchmark` reproduces the score above on your own hardware (needs a full clone; the
