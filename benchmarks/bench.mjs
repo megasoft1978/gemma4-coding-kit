@@ -144,19 +144,22 @@ async function runScenario(scenario, opts) {
     const first = gradeAndScore(scenario, content, scratchDir);
 
     if (!opts.retry || first.pass === first.bugs.length) {
-      // Plain single-shot path, byte-for-byte the same result shape as before --retry existed.
+      // Plain single-shot path, byte-for-byte the same result shape as before --retry existed, plus the
+      // prompt/content fields (additive -- readers that don't know about them are unaffected).
       return {
         scenario: scenario.id, verdict: "ok", pass: first.pass, total: first.bugs.length, wall_s: wall_s1,
         completion_tokens, tps, prompt_tps, draft_accept, bugs: first.bugs,
+        prompt, content,
       };
     }
 
     // Retry path: one more turn, shown the model's own first answer plus which checks still fail, in the
     // model's own words via grade()'s `reason` field.
+    const retryPrompt = buildRetryPrompt(first.bugs);
     const messages = [
       { role: "user", content: prompt },
       { role: "assistant", content },
-      { role: "user", content: buildRetryPrompt(first.bugs) },
+      { role: "user", content: retryPrompt },
     ];
     let content2, completion_tokens2, tps2;
     try {
@@ -168,7 +171,8 @@ async function runScenario(scenario, opts) {
       return {
         scenario: scenario.id, verdict: "ok", pass: first.pass, total: first.bugs.length, wall_s,
         completion_tokens, tps, prompt_tps, draft_accept, bugs: first.bugs,
-        retry: { attempted: true, error: e.message },
+        prompt, content,
+        retry: { attempted: true, error: e.message, prompt: retryPrompt },
       };
     }
     const wall_s = (Date.now() - t0) / 1000;
@@ -180,8 +184,11 @@ async function runScenario(scenario, opts) {
     return {
       scenario: scenario.id, verdict: "ok", pass: final.pass, total: final.bugs.length, wall_s,
       completion_tokens: (completion_tokens ?? 0) + (completion_tokens2 ?? 0), tps, prompt_tps, draft_accept,
-      bugs: final.bugs,
-      retry: { attempted: true, pass_before: first.pass, total_before: first.bugs.length, tps_turn2: tps2 },
+      bugs: final.bugs, prompt, content,
+      retry: {
+        attempted: true, pass_before: first.pass, total_before: first.bugs.length, tps_turn2: tps2,
+        prompt: retryPrompt, content: content2,
+      },
     };
   } catch (e) {
     // grade() itself threw (not an oracle failure -- those come back as pass:false). Most likely a Node too
