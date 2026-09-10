@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.11"
+KIT_VERSION="2026.09.12"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -124,7 +124,11 @@ COMPACT_KEEP=6000
 # server binary, --benchmark all). The cost: a mid-conversation edit earlier than your last message forces a
 # full prompt re-process instead of a partial one -- rare in a single-topic coding session, and --doctor will
 # tell you if you ever want to trade some of that memory back for it (raise --ctx-checkpoints).
-SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --ctx-checkpoints 0 --cache-ram 0)
+# -ub 256 -b 256: shrinks the prefill compute buffer from llama-server's default (ubatch 512). Measured
+# 1023MB -> 963MB peak dirty footprint (2 confirmed runs, identical both times), byte-identical benchmark
+# score and flat-to-slightly-faster decode speed (9-scenario suite). Safe here because these scenarios'
+# prompts are short enough that a smaller prefill batch doesn't become the bottleneck.
+SERVER_FLAGS=(-ngl 99 -fa on -c "$CTX" --no-warmup -np 1 --spec-type ngram-simple --reasoning off --ctx-checkpoints 0 --cache-ram 0 -ub 256 -b 256)
 # Pinned into config_sig deliberately: --spec-type ngram-simple's acceptance rate is prompt-dependent, so if
 # this text ever changed without a version bump, reports collected before and after the change would silently
 # describe two different measurements while claiming to be the same number.

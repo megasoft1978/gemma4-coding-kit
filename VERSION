@@ -1,5 +1,5 @@
-KIT_VERSION=2026.09.11
-CONFIG_SIG=138fbea8e49902d9
+KIT_VERSION=2026.09.12
+CONFIG_SIG=20109791039e38f6
 MODEL_FILE=gemma-4-26B-A4B-it-UD-IQ2_M.gguf
 MODEL_BYTES=10014755296
-NOTES=Fixed a stale/mis-cited speed constant: the per-chip table's "M1 -- measured" figure was 18.6, a single unrelated short completion measured under a since-changed server config, cited to an experiment whose own write-up never contains that number. Replaced with 23.6, the mean tok/s across 21 confirmed runs of the actual 7-scenario suite under the current shipped config -- the same metric the levers table already used, so the two tables finally agree. Every per-chip estimate re-derived from the corrected anchor. CONFIG_SIG unchanged: the display-only speed constants are not part of the runtime server config it hashes.
+NOTES=Shrunk the prefill batch (-ub 256 -b 256, down from llama-server's default ubatch 512): peak dirty footprint 1023MB -> 963MB (2 confirmed runs, identical both times), byte-identical benchmark score, flat-to-slightly-faster decode speed on the 9-scenario suite. Safe here because these scenarios' prompts are short enough that a smaller prefill batch never becomes the bottleneck.
