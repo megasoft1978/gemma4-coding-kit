@@ -75,12 +75,12 @@ jobs:
       - name: M4 Max shows a correctly-scaled ESTIMATE
         run: |
           out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_CHIP="Apple M4 Max" GEMMA4_KIT_FAKE_MEMBYTES=68719476736 ./setup.sh --selftest)
-          echo "$out" | grep -q "189.5" || { echo "expected 189.5 t/s estimate for M4 Max, got: $out"; exit 1; }
+          echo "$out" | grep -q "213.6" || { echo "expected 213.6 t/s estimate for M4 Max, got: $out"; exit 1; }
       - name: unknown chip falls back to M1 bandwidth but still says ESTIMATE
         run: |
           out=$(GEMMA4_KIT_SELFTEST=1 GEMMA4_KIT_FAKE_CHIP="Apple M99 Ultra Pro" GEMMA4_KIT_FAKE_MEMBYTES=17179869184 ./setup.sh --selftest)
           echo "$out" | grep -q "ESTIMATED" || { echo "expected ESTIMATED for unknown chip, got: $out"; exit 1; }
-          echo "$out" | grep -q "23.6" || { echo "expected M1-bandwidth-derived 23.6 t/s for unknown chip, got: $out"; exit 1; }
+          echo "$out" | grep -q "26.6" || { echo "expected M1-bandwidth-derived 26.6 t/s for unknown chip, got: $out"; exit 1; }
       - name: no-tty declines rather than hangs
         run: |
           # A fresh macos-latest runner has neither llama-server nor pi, so install mode (with the 7GB runner's

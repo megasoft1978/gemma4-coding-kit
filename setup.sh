@@ -20,7 +20,7 @@
 #
 # One mode needs a real git checkout, not the curl-pipe install, because it has data too large to embed here:
 #
-#   ./setup.sh --benchmark [scenario-id|all]   # grade a running server against the 7-scenario suite in benchmarks/
+#   ./setup.sh --benchmark [scenario-id|all]   # grade a running server against the 9-scenario suite in benchmarks/
 #
 # Self-contained on purpose: when piped through `curl | bash`, there is no local checkout to reference sibling
 # files from, so every step lives in this one file. Prompts read from /dev/tty rather than stdin, because a
@@ -47,7 +47,7 @@ Other modes (pass flags through a pipe with `bash -s --`, otherwise bash reads t
   --check           compare this install against the latest release
   --upgrade         reapply the current config + restart the server
   --report-speed    measure real tokens/sec on a chip this kit only estimates for
-  --benchmark [id]  grade a running server against the 7-scenario suite (needs a git checkout)
+  --benchmark [id]  grade a running server against the 9-scenario suite (needs a git checkout)
 
 Modifiers:
   --yes             answer yes to EVERY prompt, including installing llama.cpp / pi via brew / npm
@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.12"
+KIT_VERSION="2026.09.13"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -286,18 +286,19 @@ chip_bandwidth() {
 # chips" section) -- no other code path changes.
 chip_measured_tps() {
   case "$1" in
-    # Mac mini M1 16GB, EXP-055 (research repo), the shipped 7-scenario/36-bug suite itself, not a synthetic
-    # micro-benchmark: mean tok/s across 21 confirmed suite runs under this exact server config. The kit's
-    # own levers table (README "What was tried and what shipped") uses the same metric, so this number and
-    # that table finally agree -- an earlier value here (18.6) measured a single unrelated short completion
-    # under a since-changed server config and was never reconciled with the rest of this file.
-    "Apple M1") echo 23.6 ;;
+    # Mac mini M1 16GB, EXP-073 (research repo), the shipped 9-scenario/44-bug suite itself, not a synthetic
+    # micro-benchmark: mean tok/s across confirmed suite runs under this exact server config. The kit's own
+    # levers table (README "Levers measured") uses the same metric, so this number and that table agree --
+    # this was 23.6 before the -ub 256 -b 256 batch-size lever (EXP-073) raised shipped-config decode speed;
+    # update this value again if a future lever changes shipped-config speed, so it never goes stale like the
+    # very first version of this constant did (18.6, from a since-changed config, never reconciled here).
+    "Apple M1") echo 26.6 ;;
     *)          echo ""   ;;
   esac
 }
 
 speed_line() {  # prints the measured-or-estimated speed line for $CHIP; requires detect_hw to have run
-  local bw m1_bw=68 m1_tps=23.6 measured est
+  local bw m1_bw=68 m1_tps=26.6 measured est
   bw=$(chip_bandwidth "$CHIP")
   measured=$(chip_measured_tps "$CHIP")
   if [ -n "$measured" ]; then
@@ -945,7 +946,7 @@ upgrade() {
 }
 
 # ============================================================================================================
-# --benchmark -- grades an already-running, already-validated server against the 7-scenario suite in
+# --benchmark -- grades an already-running, already-validated server against the 9-scenario suite in
 # benchmarks/. Never boots a server itself (same division of responsibility as --doctor: measures what's
 # there, doesn't set it up). Needs a real git checkout, not the curl-pipe install, because the scenario data
 # and oracle test trees are too large to embed in this file -- see run_benchmark's own precondition check.

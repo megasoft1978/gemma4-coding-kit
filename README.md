@@ -42,14 +42,14 @@ script into `bash`? Read `setup.sh` first — one self-contained file, every com
 
 ## Benchmarks
 
-Bugs fixed across 7 realistic multi-file projects (React + Express + TypeScript), reported the way you'd
+Bugs fixed across 9 realistic multi-file projects (React + Express + TypeScript), reported the way you'd
 actually describe them to a coding agent: by symptom, never by cause. That's the number that matters, because
 that's how people use one.
 
 | Mode | Score |
 |---|---|
-| Single answer | **28/30 (93%)** |
-| One self-correct retry (`--retry`) | **30/30 (100%)** |
+| Single answer | **36/38 (95%)** |
+| One self-correct retry (`--retry`) | **38/38 (100%)** |
 
 The retry number isn't the shipped default — it's a second measurement. `pi` gets one shot per turn; this is
 what happens if you show the model exactly which of its own checks still fail and let it take one more pass.
@@ -60,14 +60,14 @@ Runs in about 10GB total: ~9.3GB of model weights on disk, plus ~1GB of working 
 
 | Chip | tokens/sec |
 |---|---|
-| M1 | **23.6 — measured** (mean across the full suite, shipped config) |
-| M2 / M3 | ~34.7 — estimated |
-| M2 Pro | ~69.4 — estimated |
-| M3 Pro | ~52.1 — estimated |
-| M1/M2/M3 Max | ~138.8 — estimated |
-| M4 | ~41.6 — estimated |
-| M4 Pro | ~94.7 — estimated |
-| M4 Max | ~189.5 — estimated |
+| M1 | **26.6 — measured** (mean across the full suite, shipped config) |
+| M2 / M3 | ~39.1 — estimated |
+| M2 Pro | ~78.2 — estimated |
+| M3 Pro | ~58.7 — estimated |
+| M1/M2/M3 Max | ~156.5 — estimated |
+| M4 | ~46.9 — estimated |
+| M4 Pro | ~106.8 — estimated |
+| M4 Max | ~213.6 — estimated |
 
 Non-M1 numbers are estimated from published memory bandwidth, not measured — run `--report-speed` to contribute
 a real one. `setup.sh --benchmark` reproduces the score above on your own hardware (needs a full clone; the
@@ -78,19 +78,24 @@ scenario data doesn't fit in a single script).
 
 | Config | Bugs fixed | tok/s | Verdict |
 |---|---|---|---|
-| Before the memory fix | 27/30 | 22.3 | reference (4.9GB peak memory) |
-| **Shipped default** | **28/30** | **23.6** | `--ctx-checkpoints 0 --cache-ram 0` — the memory growth was two llama-server bookkeeping defaults, not the KV cache (a fixed 780MB here). Turning them off costs nothing and drops peak memory to ~1GB. |
-| Optional recipe (not shipped) | 28/30 | 26.5 | Requantizing only the always-on attention/embedding tensors, leaving every expert untouched, cuts bytes read per token 10% for +12% more speed. Not the default because it produces a model file this kit doesn't host — see `optional/` in this repo if you want to build it yourself. |
-| A community speculative-decoding drafter | 28/30 | 21.6 | 83% draft acceptance, still *slower* — on this model, verifying each drafted token costs its own expert lookup, so a better drafter doesn't help. Rejected. |
-| Quantizing experts further too | 25/30 | 21.6 | 3 more bugs lost for no speed gain — the experts are where this model's quality actually lives. Rejected. |
-| A smaller pruned variant | 23/30 | 21.5 | Fewer bytes, same speed, but answers ran 1.3–3.4× longer and one scenario hit the output-length ceiling before finishing. Rejected. |
-| A stronger prompt demanding every file get touched | 25/30 | — | Made things worse — broke a scenario (`realtime-sync`) that was already passing, on top of not fixing the two it targeted. Rejected. |
-| Google's recommended sampling (temp 1.0/top_k 64/top_p 0.95) | 27/30 | — | Worse than temperature 0 — a new, different bug fails than the usual near-tie. Rejected. |
-| Top-nσ sampling (temp 1.0/top_nσ 1.0) | 25/30 | — | Also worse than temperature 0. Rejected. |
-| `max_tokens` 3072 → 4096 | 28/30 | — | No effect — byte-identical output. Truncation was never the limiter. Not adopted (no reason to). |
-| A few-shot example in the prompt | 26/30 | — | Worse — confirms this size of model can regress on few-shot even with a short, unrelated example. Rejected. |
-| Alternative quant, bartowski IQ2_XXS | 25/30 | — | Fixed one known miss, broke four others in `realtime-sync`. Rejected. |
-| Alternative quant, mradermacher i1-IQ2_M | 22/30 | — | Worse than the bartowski attempt too. This kit's quant beats both alternatives on this suite. Rejected. |
+| Before the memory fix | ~27/30¹ | 22.3 | reference (4.9GB peak memory) |
+| Memory fix, before the batch-size shrink | 36/38 | 24.4 | `--ctx-checkpoints 0 --cache-ram 0` — the memory growth was two llama-server bookkeeping defaults, not the KV cache (a fixed 780MB here). Turning them off costs nothing and drops peak memory to ~1GB. |
+| **Shipped default** | **36/38** | **26.6** | Adds `-ub 256 -b 256` on top of the memory fix — a smaller prefill batch shrinks the remaining working buffer another ~6% (1023MB → 963MB peak, confirmed twice), same score, same-or-faster decode. |
+| Optional recipe (not shipped) | 36/38 | 28.1 | Requantizing only the always-on attention/embedding tensors, leaving every expert untouched, cuts bytes read per token 10% for further speed on top of the shipped flags. Not the default because it produces a model file this kit doesn't host — see `optional/` in this repo if you want to build it yourself. |
+| A smaller prefill batch still (`-ub 128 -b 128`) | 36/38 | — | ~4MB more memory saved — within noise. Not adopted; 256 is the floor. |
+| A community speculative-decoding drafter | ~28/30¹ | 21.6 | 83% draft acceptance, still *slower* — on this model, verifying each drafted token costs its own expert lookup, so a better drafter doesn't help. Rejected. |
+| Quantizing experts further too | ~25/30¹ | 21.6 | 3 more bugs lost for no speed gain — the experts are where this model's quality actually lives. Rejected. |
+| A smaller pruned variant | ~23/30¹ | 21.5 | Fewer bytes, same speed, but answers ran 1.3–3.4× longer and one scenario hit the output-length ceiling before finishing. Rejected. |
+| A stronger prompt demanding every file get touched | ~25/30¹ | — | Made things worse — broke a scenario (`realtime-sync`) that was already passing, on top of not fixing the two it targeted. Rejected. |
+| Google's recommended sampling (temp 1.0/top_k 64/top_p 0.95) | ~27/30¹ | — | Worse than temperature 0 — a new, different bug fails than the usual near-tie. Rejected. |
+| Top-nσ sampling (temp 1.0/top_nσ 1.0) | ~25/30¹ | — | Also worse than temperature 0. Rejected. |
+| `max_tokens` 3072 → 4096 | 36/38 | — | No effect — byte-identical output. Truncation was never the limiter. Not adopted (no reason to). |
+| A few-shot example in the prompt | ~26/30¹ | — | Worse — confirms this size of model can regress on few-shot even with a short, unrelated example. Rejected. |
+| Alternative quant, bartowski IQ2_XXS | ~25/30¹ | — | Fixed one known miss, broke four others in `realtime-sync`. Rejected. |
+| Alternative quant, mradermacher i1-IQ2_M | ~22/30¹ | — | Worse than the bartowski attempt too. This kit's quant beats both alternatives on this suite. Rejected. |
+
+¹ Measured on the original 7-scenario/30-counted-bug suite, before `job-queue` and `permissions-cache` were
+added — never re-run on the expanded suite since each was already rejected on its own terms.
 
 Not perfectly lossless: at temperature 0, one bug flips depending on speculative decoding being on or off — a
 real, deterministic side effect of batch-shape-dependent floating-point rounding, not noise.
@@ -101,18 +106,19 @@ real, deterministic side effect of batch-shape-dependent floating-point rounding
 <summary><strong>Every bug report, and every bug — pass, fail, and why</strong></summary>
 
 
-Only 3 of the 7 scenarios have any failures on the shipped config or the optional recipe; the other 4
-(`auth-session`, `cart-checkout`, `items-search`, `notify-channel`) score 100% on both and are omitted below for
-length. Each block below shows every bug in that scenario (not just the failures), the wall-clock time, decode
-speed, and tokens generated, the exact prompt sent, and — where a retry fired — the exact retry prompt and result.
+Only 3 of the 9 scenarios have any failures on the shipped config or the optional recipe; the other 6
+(`auth-session`, `cart-checkout`, `items-search`, `job-queue`, `notify-channel`, `permissions-cache`) score
+100% on both and are omitted below for length. Each block below shows every bug in that scenario (not just the
+failures), the wall-clock time, decode speed, and tokens generated, the exact prompt sent, and — where a retry
+fired — the exact retry prompt and result.
 
 <details>
 <summary><code>api-versioning</code> — 6/6 shipped, 5/6 optional recipe</summary>
 
 | | Shipped | Optional recipe |
 |---|---|---|
-| Time | 36.5s | 59.8s |
-| Speed | 23.6 tok/s | 25.6 tok/s |
+| Time | 36.6s | 63.1s |
+| Speed | 23.8 tok/s | 24.4 tok/s |
 | Tokens generated | 741 | 1405 |
 
 <details><summary>Exact prompt sent</summary>
@@ -229,9 +235,9 @@ No explanation.
 
 | | Shipped | Optional recipe |
 |---|---|---|
-| Time | 48.7s | 42.9s |
-| Speed | 24.0 tok/s | 26.5 tok/s |
-| Tokens generated | 877 | 854 |
+| Time | 47.2s | 44.1s |
+| Speed | 25.1 tok/s | 26.5 tok/s |
+| Tokens generated | 878 | 854 |
 
 <details><summary>Exact prompt sent</summary>
 
@@ -475,7 +481,7 @@ No explanation.
 
 **With one retry** (`bench.mjs --retry`):
 
-- Time: 75.6s total · Speed (retry turn): 18.2 tok/s · Tokens generated: 1052 total
+- Time: 76.2s total · Speed (retry turn): 18.8 tok/s · Tokens generated: 1053 total
 
 <details><summary>Exact retry prompt sent</summary>
 
@@ -496,8 +502,8 @@ Result: **5/5** — up from 4/5 before the retry.
 
 | | Shipped | Optional recipe |
 |---|---|---|
-| Time | 66.4s | 57.9s |
-| Speed | 18.9 tok/s | 20.9 tok/s |
+| Time | 65.6s | 58.6s |
+| Speed | 19.3 tok/s | 20.9 tok/s |
 | Tokens generated | 1108 | 1059 |
 
 <details><summary>Exact prompt sent</summary>
@@ -698,7 +704,7 @@ No explanation.
 
 **With one retry** (`bench.mjs --retry`):
 
-- Time: 98.4s total · Speed (retry turn): 33.2 tok/s · Tokens generated: 1582 total
+- Time: 94.9s total · Speed (retry turn): 34.5 tok/s · Tokens generated: 1582 total
 
 <details><summary>Exact retry prompt sent</summary>
 

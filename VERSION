@@ -1,5 +1,5 @@
-KIT_VERSION=2026.09.12
+KIT_VERSION=2026.09.13
 CONFIG_SIG=20109791039e38f6
 MODEL_FILE=gemma-4-26B-A4B-it-UD-IQ2_M.gguf
 MODEL_BYTES=10014755296
-NOTES=Shrunk the prefill batch (-ub 256 -b 256, down from llama-server's default ubatch 512): peak dirty footprint 1023MB -> 963MB (2 confirmed runs, identical both times), byte-identical benchmark score, flat-to-slightly-faster decode speed on the 9-scenario suite. Safe here because these scenarios' prompts are short enough that a smaller prefill batch never becomes the bottleneck.
+NOTES=Re-measured the shipped-config speed anchor after the -ub 256 -b 256 lever (2026.09.12): M1 measured tok/s was 23.6, now 26.6 (mean across the 9-scenario suite under the current shipped flags). Recomputed every per-chip estimate from the new anchor and updated the CI assertions and README to match, so the honesty-fix from 2026.09.11 doesn't silently go stale again the next time a lever changes shipped-config speed. CONFIG_SIG unchanged: these are display-only constants, not part of the runtime server config it hashes.
