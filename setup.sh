@@ -99,7 +99,7 @@ done
 # literal that also appears above it. SERVER_FLAGS is a bash array (not a string) so it can be checked
 # element-by-element (doctor's flag-drift check) and hashed as a whole (config_sig).
 # ============================================================================================================
-KIT_VERSION="2026.09.13"
+KIT_VERSION="2026.09.14"
 KIT_DIR="$HOME/.gemma4-coding-kit"
 MODEL_DIR="$KIT_DIR/models"
 PORT=8114
@@ -137,6 +137,20 @@ REPORT_PROMPT="Write a small TypeScript function that debounces another function
 # script acts on (every constant above is still what actually runs). A compromised or lagging beacon can tell
 # you you're behind; it cannot change what your machine does.
 VERSION_URL="https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/VERSION"
+# Two client-side `pi` extensions, added after a real-repo probe (EXP-077, research repo) found this model
+# stalls or malforms tool calls on realistic multi-step tasks -- something the kit's own single-shot benchmark
+# suite can't surface. Neither touches the server or SERVER_FLAGS, so neither is part of config_sig.
+#   1. gemma4-tool-recovery.ts (this repo, pi-extensions/): llama.cpp's Gemma-4 tool-call format uses native
+#      tokens (<|tool_call>call:name{...}<tool_call|>), a fragile, actively-churning parser path (llama.cpp
+#      #22786, #21375, #21316) -- a decoding hiccup leaks a malformed fragment instead of a real call, silently,
+#      with no error. This extension recovers a COMPLETE leaked call when one is parseable, and otherwise
+#      injects one corrective retry turn, capped at 2 in a row.
+#   2. pi-anti-doom-loop (npm, https://github.com/irfndi/pi-anti-doom-loop, MIT, reviewed before adding):
+#      blocks identical repeated tool calls before they burn the whole turn budget -- measured directly to
+#      convert a silent 10-minute timeout into a clean ~7-minute finish on the same real task (EXP-077 follow-up).
+PI_EXTENSION_URL="https://raw.githubusercontent.com/megasoft1978/gemma4-coding-kit/main/pi-extensions/gemma4-tool-recovery.ts"
+PI_EXTENSION_FILE="gemma4-tool-recovery.ts"
+PI_ANTI_LOOP_PACKAGE="npm:pi-anti-doom-loop"
 # Substrings doctor checks for in the running server's own command line -- kept separate from SERVER_FLAGS
 # because some flags take a value (`-c 24576`) and checking that as one substring is more reliable than
 # checking `-c` and `24576` independently, which could each appear for unrelated reasons.
@@ -596,6 +610,65 @@ configure_or_die() {  # PRIOR=$(step_config) with the failure actually stopping 
   }
 }
 
+# Installs the two tool-call-reliability extensions (see the comment above PI_EXTENSION_URL). Failure here is
+# non-fatal -- these harden an already-working setup, they don't gate it -- but every failure is reported so
+# it's never silently skipped. Re-run-safe: re-downloads the extension file every time (cheap, always current)
+# and only appends to settings.json's `packages`/`extensions` arrays when the entry isn't already present, so
+# it never grows duplicates across repeated installs/upgrades and never touches an entry a user added themselves.
+step_pi_extensions() {
+  echo
+  echo "== Installing pi tool-call reliability extensions =="
+  mkdir -p "$KIT_DIR/pi-extensions"
+  local ext_dest="$KIT_DIR/pi-extensions/$PI_EXTENSION_FILE"
+  if curl -fsSL "$PI_EXTENSION_URL" -o "$ext_dest.tmp" 2>/dev/null; then
+    mv "$ext_dest.tmp" "$ext_dest"
+    echo "downloaded $ext_dest"
+  else
+    rm -f "$ext_dest.tmp"
+    echo "warning: could not download $PI_EXTENSION_URL -- skipping gemma4-tool-recovery.ts this run." >&2
+  fi
+
+  if [ -f "$ext_dest" ]; then
+    EXT_DEST="$ext_dest" node -e '
+      const fs = require("fs");
+      const path = process.env.HOME + "/.pi/agent/settings.json";
+      let cfg = {};
+      if (fs.existsSync(path)) {
+        try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); }
+        catch (e) { console.error(path + " exists but is not valid JSON (" + e.message + ") -- refusing to touch it."); process.exit(3); }
+      }
+      if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+      cfg.extensions = Array.isArray(cfg.extensions) ? cfg.extensions : [];
+      if (!cfg.extensions.includes(process.env.EXT_DEST)) cfg.extensions.push(process.env.EXT_DEST);
+      fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
+      console.error("settings.json extensions[] includes " + process.env.EXT_DEST);
+    ' || echo "warning: failed to register the extension in settings.json." >&2
+  fi
+
+  PI_ANTI_LOOP_PACKAGE="$PI_ANTI_LOOP_PACKAGE" node -e '
+    const fs = require("fs");
+    const path = process.env.HOME + "/.pi/agent/settings.json";
+    let cfg = {};
+    if (fs.existsSync(path)) {
+      try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); }
+      catch (e) { console.error(path + " exists but is not valid JSON (" + e.message + ") -- refusing to touch it."); process.exit(3); }
+    }
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+    cfg.packages = Array.isArray(cfg.packages) ? cfg.packages : [];
+    if (!cfg.packages.includes(process.env.PI_ANTI_LOOP_PACKAGE)) cfg.packages.push(process.env.PI_ANTI_LOOP_PACKAGE);
+    fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
+    console.error("settings.json packages[] includes " + process.env.PI_ANTI_LOOP_PACKAGE);
+  ' || echo "warning: failed to register $PI_ANTI_LOOP_PACKAGE in settings.json." >&2
+
+  # Install it now rather than waiting for pi's own on-startup auto-install, so the first real run isn't the
+  # one paying the (small, one-time) npm install cost, and so a failure here is visible immediately.
+  if command -v pi >/dev/null 2>&1; then
+    pi install "$PI_ANTI_LOOP_PACKAGE" --approve >/dev/null 2>&1 \
+      && echo "installed $PI_ANTI_LOOP_PACKAGE" \
+      || echo "warning: 'pi install $PI_ANTI_LOOP_PACKAGE' failed -- pi will retry automatically on next startup." >&2
+  fi
+}
+
 # Writes AGENTS.md into the CURRENT directory. If one already exists and isn't ours (no marker line, or a
 # marker from a different write than we're about to do isn't checkable here -- that's uninstall's job to
 # decide, not install's), it's backed up rather than silently destroyed. The original `cat > ./AGENTS.md`
@@ -834,6 +907,14 @@ doctor() {
       echo "       -> endless-compaction risk; a 143-round loop that edits nothing. Rewrite config only:"
       echo "          setup.sh --config-only"
     fi
+    local has_ext has_pkg
+    has_ext=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.pi/agent/settings.json","utf8")).extensions||[];process.stdout.write(e.some(p=>String(p).endsWith("'"$PI_EXTENSION_FILE"'"))?"1":"0")' 2>/dev/null || echo 0)
+    has_pkg=$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.pi/agent/settings.json","utf8")).packages||[];process.stdout.write(p.includes("'"$PI_ANTI_LOOP_PACKAGE"'")?"1":"0")' 2>/dev/null || echo 0)
+    if [ "$has_ext" = 1 ] && [ "$has_pkg" = 1 ]; then
+      tag ok "settings.json has both tool-call-reliability extensions ($PI_EXTENSION_FILE, $PI_ANTI_LOOP_PACKAGE)"
+    else
+      tag fail "settings.json is missing one or both tool-call-reliability extensions -- run: setup.sh --config-only"
+    fi
   fi
 
   echo
@@ -930,6 +1011,7 @@ upgrade() {
   step_download
   step_server restart
   configure_or_die
+  step_pi_extensions
   step_agents_md
   write_manifest "$PRIOR"
   if [ -n "$old_model" ] && [ "$old_model" != "$DEST" ] && [ -f "$old_model" ]; then
@@ -1135,6 +1217,7 @@ case "$MODE" in
     ;;
   config-only)
     configure_or_die
+    step_pi_extensions
     write_manifest "$PRIOR"
     step_agents_md
     echo
@@ -1149,6 +1232,7 @@ case "$MODE" in
     step_download
     step_server reuse
     configure_or_die
+    step_pi_extensions
     step_agents_md
     write_manifest "$PRIOR"
     echo

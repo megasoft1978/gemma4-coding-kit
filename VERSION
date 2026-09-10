@@ -1,5 +1,5 @@
-KIT_VERSION=2026.09.13
+KIT_VERSION=2026.09.14
 CONFIG_SIG=20109791039e38f6
 MODEL_FILE=gemma-4-26B-A4B-it-UD-IQ2_M.gguf
 MODEL_BYTES=10014755296
-NOTES=Re-measured the shipped-config speed anchor after the -ub 256 -b 256 lever (2026.09.12): M1 measured tok/s was 23.6, now 26.6 (mean across the 9-scenario suite under the current shipped flags). Recomputed every per-chip estimate from the new anchor and updated the CI assertions and README to match, so the honesty-fix from 2026.09.11 doesn't silently go stale again the next time a lever changes shipped-config speed. CONFIG_SIG unchanged: these are display-only constants, not part of the runtime server config it hashes.
+NOTES=Added two client-side pi extensions after a real-repo probe (EXP-077, research repo) found this model stalls or malforms tool calls on realistic multi-step tasks -- a failure surface the kit's own single-shot benchmark suite structurally cannot see. gemma4-tool-recovery.ts (this repo, pi-extensions/) recovers a complete leaked Gemma-4 native tool-call token sequence when parseable, or injects one corrective retry turn (capped at 2) otherwise. pi-anti-doom-loop (npm, reviewed before adding) blocks identical repeated tool calls -- measured to convert a silent 10-minute timeout into a clean ~7-minute finish on the same real task. Neither touches SERVER_FLAGS, so CONFIG_SIG is unchanged. The HF-hosting migration to the attnQ4K requant is a separate, still-in-progress task (blocked on a slow upload) -- MODEL_FILE/MODEL_BYTES here are unchanged from KIT_VERSION 2026.09.13.
